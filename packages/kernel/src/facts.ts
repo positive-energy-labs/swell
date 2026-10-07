@@ -30,6 +30,8 @@ export const Attempt = Fact.make({
   class: "kernel",
   fields: { rule: Schema.String, subject: Schema.String },
   key: ["rule", "subject"],
+  // A rule's attempts since a time, for a rate limit that counts attempts rather than successes.
+  indexes: { by_rule: ["rule", "at"] },
   meta: {
     ...kernel,
     label: "Attempt",
