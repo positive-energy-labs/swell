@@ -1,14 +1,14 @@
 {
-  "name": "@tc/tide",
+  "name": "swell",
   "version": "0.0.0",
   "private": true,
   "bin": {
-    "tide": "./src/bin.ts"
+    "swell": "./src/bin.ts"
   },
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./host": "./src/host.ts"
+    "./controller": "./src/controller.ts"
   },
   "scripts": {
     "test": "vp test"

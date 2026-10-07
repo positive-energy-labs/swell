@@ -11,7 +11,7 @@ import {
 import { Decide } from "./loop.ts";
 
 /**
- * The host's door, one contract the server and the peer client both derive from: route names, the wire
+ * The controller's door, one contract the server and the peer client both derive from: route names, the wire
  * encoding of `eq`/`gte`/`lt`, the limit bound, auth, and error statuses cannot drift apart.
  */
 const Value = Schema.Union([Schema.String, Schema.Number, Schema.Boolean]);
@@ -20,14 +20,14 @@ const Wire = <S extends Schema.Constraint>(s: S) => Schema.optional(Schema.fromJ
 const err = <T extends string>(tag: T, httpApiStatus: number) =>
   Schema.TaggedError<{ _tag: T }>()(tag, { message: Schema.String }, { httpApiStatus });
 
-export class NoPeerToken extends err("NoPeerToken", 401) {}
+export class NoToken extends err("NoToken", 401) {}
 export class BadRead extends err("BadRead", 400) {}
 
 /** Bearer auth. `requiredForClient` turns a peer that forgot its token into a missing-layer compile error. */
-export class PeerAuth extends HttpApiMiddleware.Service<PeerAuth>()("tide/PeerAuth", {
+export class DoorAuth extends HttpApiMiddleware.Service<DoorAuth>()("swell/DoorAuth", {
   requiredForClient: true,
   security: { bearer: HttpApiSecurity.bearer },
-  error: NoPeerToken,
+  error: NoToken,
 }) {}
 
 export const Rows = Schema.Array(Schema.Record(Schema.String, Schema.Unknown));
@@ -35,7 +35,7 @@ export const Tallies = Schema.Array(
   Schema.Struct({ key: Schema.String, value: Schema.Record(Schema.String, Schema.Number) }),
 );
 
-/** What one tide may read of another: facts by index and tallies by range, both bounded. Never a write. */
+/** What one controller may read of another: facts by index and tallies by range, both bounded. Never a write. */
 export class PeerGroup extends HttpApiGroup.make("peer")
   .add(
     HttpApiEndpoint.get("facts", "/facts/:table", {
@@ -57,10 +57,10 @@ export class PeerGroup extends HttpApiGroup.make("peer")
       success: Tallies,
     }),
   )
-  .middleware(PeerAuth) {}
+  .middleware(DoorAuth) {}
 
-/** The page's reads: a gauge, no auth. */
-export class PageGroup extends HttpApiGroup.make("page").add(
+/** The HMI's reads: a gauge, no auth. */
+export class HmiGroup extends HttpApiGroup.make("hmi").add(
   HttpApiEndpoint.get("view", "/view", {
     query: { plant: Schema.optional(Schema.String) },
     success: Schema.Unknown,
@@ -68,11 +68,11 @@ export class PageGroup extends HttpApiGroup.make("page").add(
   HttpApiEndpoint.get("health", "/health", { success: Schema.Unknown }),
 ) {}
 
-/** The page's one verb, decoded from the command's own arg schemas, under the same token as the peer door. */
-export class ActGroup extends HttpApiGroup.make("act")
+/** The operator's one verb, decoded from the command's own arg schemas, under the same token as the peer door. */
+export class OperatorGroup extends HttpApiGroup.make("operator")
   .add(
     HttpApiEndpoint.post("decide", "/decide", {
-      payload: Schema.Struct({ ...Decide.args, person: Schema.String }),
+      payload: Schema.Struct({ ...Decide.args, operator: Schema.String }),
       success: Schema.Struct({ verdict: Schema.String }),
       error: [
         InvariantViolation.pipe(HttpApiSchema.status(422)),
@@ -80,6 +80,6 @@ export class ActGroup extends HttpApiGroup.make("act")
       ],
     }),
   )
-  .middleware(PeerAuth) {}
+  .middleware(DoorAuth) {}
 
-export const TideApi = HttpApi.make("tide").add(PeerGroup).add(PageGroup).add(ActGroup);
+export const ControllerApi = HttpApi.make("swell").add(PeerGroup).add(HmiGroup).add(OperatorGroup);

@@ -1,71 +1,81 @@
-# tide
+# swell
 
-Evidence in, waves out. A background loop that watches a plant, lets evidence pile up as facts, and changes the plant in gated waves once the evidence clears a bar. General over targets: a git repo, The Current's fact log, a Drive folder, PostHog replays. Two packages: `packages/kernel` (facts, rules, ports, receipts; copied from The Current at `8c5c0bb`, now owned here) and `packages/tide` (the loop as kernel primitives, a git plant, a SQLite store, a host).
+Evidence in, moves out. A controller watches a plant, lets evidence pile up as facts, and moves the plant once the evidence crosses a threshold, each move gated by its operator. General over targets: a git repo, The Current's fact log, a Drive folder, PostHog replays. Two packages: `packages/kernel` (facts, rules, ports, receipts; copied from The Current at `8c5c0bb`) and `packages/swell` (the loop as kernel primitives, a git plant, a SQLite historian, a controller with its door and HMI).
 
 **The code is the spec.** Rulings live in `meta(..., "why")` on each primitive and in commit messages. This file holds only what code cannot say.
 
-## Nouns
+## Vocabulary
 
-| Noun      | What it is                                                              | Who mints its id                                      |
-| --------- | ----------------------------------------------------------------------- | ----------------------------------------------------- |
-| **plant** | what a loop measures: a repo at a sha, a deployment at a time, a folder | the origin, never tide                                |
-| **host**  | one process, one store, many plants: a laptop daemon, or Convex         | tide; the one minted name                             |
-| **loop**  | one row of a plant's `tide.config.ts`                                   | the plant, as `<plant>/<loop>`                        |
-| **fact**  | reading, snapshot, proposal, verdict, observed                          | the host that wrote it, as `tide:<host>/<table>/<id>` |
+Control theory, all the way down (Kai, 2026-10-07). The words are established so an agent that knows control theory reads the code right the first time. Where control theory has no honest word, the plain one stays: proposal, verdict, brief, cite, peer, door.
 
-A signal is never a row: it rides inside a reading and the issues rollup folds it by fingerprint. An issue is a tally, never a row. A wave is one loop acting once on one fingerprint; the receipt is its history entry.
+| Word            | What it is                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------ |
+| **plant**       | what a loop measures and moves: a repo at a sha, a deployment at a time, a folder                            |
+| **controller**  | one process, one historian, many plants: the laptop daemon, or Convex                                        |
+| **sample**      | the plant at one instant; instruments measure a sample, never a moving tree                                  |
+| **sensor**      | a deterministic instrument: argv at a clean checkout                                                         |
+| **observer**    | a model instrument: it estimates what no sensor can measure and distills it to cited signals                 |
+| **measurement** | one instrument over one sample, with its denominator; `measured` from a sensor, `estimated` from an observer |
+| **signal**      | one thing an instrument saw; never a row, it rides inside a measurement                                      |
+| **signature**   | what signals group under, and its tally; never a row, folded from the rollup                                 |
+| **threshold**   | when a signature's evidence is enough to move                                                                |
+| **hysteresis**  | a dismissal holds until the evidence set grows                                                               |
+| **actuator**    | what makes the move: argv in a worktree, handed the brief                                                    |
+| **move**        | one loop acting once on one signature; the receipt is its history entry                                      |
+| **limit**       | the actuator's rate limit, moves per day                                                                     |
+| **mode**        | `manual`: the operator approves each move; `auto`: it applies                                                |
+| **operator**    | who approves, and who the loop acts for                                                                      |
+| **feedback**    | the path that brings a new sample and the operator's decisions back in                                       |
+| **historian**   | the controller's store                                                                                       |
+| **HMI**         | the operator's screen                                                                                        |
+
+**The brand is only where a person types it**: the `swell` CLI and package, `swell.config.ts`, `SWELL_*` variables, `~/.swell`. Everything stored uses the domain: fact ids are `control::<name>` (the kernel's `namespace::name` grammar, which also names the table, `control_measurement`), and a URN is `control:<controller>/<table>/<id>` (a scheme, one colon). A product rename never migrates a row.
 
 ## Rulings (Kai, 2026-10-07)
 
-- **Identity is where it was written; everything else is a citation.** A fact lives with the host that wrote it and is never copied. Elsewhere it is a `tide::observed` row keyed by URN. A citation points at the origin, not the nearest tide: a merged change is cited by its PR, never by the laptop that proposed it.
-- **Convex holds facts about the business; the laptop holds facts about code.** Two hosts, three plants: the laptop daemon over the Pe.Tools and TC repos, Convex over PE's business with Drive and PostHog loops as ports.
-- **Waves never span tides.** Cross-tide is evidence in by URN through the peer port, and a proposal out through the peer's own gate. Distributed receipts would be a second state owner, which is why Temporal was rejected.
-- **Humans approve the thing that will run.** A proposal's `apply` is target-typed and opaque to the kernel: a PR ref for git, a command call for The Current, a port call for Drive. One gate, on the exact apply.
-- **One wave per fingerprint.** The subject is the fingerprint plus the evidence set, so a new source is a new subject and the kernel's receipt dedupes the rest. A batch wave is the unreadable merge.
-- **A dismissal is keyed to the evidence set**, not a rate or a clock. A rate wobbles across a floor; a set only grows.
-- **Strength is distinct sources, never a count.** Counts are gauges. The default bar: two sources agree, or one measured source sees it in every run of the window.
-- **Model sensors are admissible** when they distill what no number holds into a cited fact. Conditions: a budget (`every.commits`), fingerprints from a closed `vocabulary` (an outsider is `new:` and needs a second source), the actuator's brief is the evidence and never the number, and the sensor's model is never the actuator's with shared context (unenforced; a convention).
-- **A failed reading is an error row, never a zero.** Readings carry their denominator.
-- **A model reading is irreplaceable.** It cost money and cannot be recomputed. Deterministic readings could be, but the rollup hangs on them, so both are rows.
-- **The host's identity.** A daemon is not a person. It writes `by: host:<name>`; a reading loop reads a peer as the person who enabled it. That person is the authorization, so `via` is the rule's enabler.
-- **The host's own tree is never the plant.** Sensors and actuators run in worktrees under the host's work dir. `apply` with no PR merges only into a ref checked out at the plant root, and refuses a dirty tree.
-- **Every commit the host makes is the host's.** `user.name=tide`, whatever identity the machine has or lacks.
-- **The kernel moved here, not a layer over it.** It has one dependency, `effect`, and nothing of The Current inside. The Current consumes it by `file:` path today and by a mise vendor task later. `Source`, `Layer`, `Audience` and `Agent` are strings; a domain narrows them.
+- **Identity is where it was written; everything else is a citation.** A fact lives with the controller that wrote it and is never copied. Elsewhere it is a `control::cite` row keyed by URN. A citation points at the origin, not the nearest controller: a merged change is cited by its PR, never by the laptop that proposed it.
+- **Convex holds facts about the business; the laptop holds facts about code.** Two controllers, three plants: the laptop daemon over the Pe.Tools and TC repos, Convex over PE's business with Drive and PostHog loops as ports.
+- **Moves never span controllers.** Cross-controller is evidence in by URN through the peer port, and a proposal out through the peer's own operator. Distributed receipts would be a second state owner, which is why Temporal was rejected.
+- **Operators approve the thing that will run.** A proposal's `apply` is target-typed and opaque to the kernel: a PR ref for git, a command call for The Current, a port call for Drive.
+- **One move per signature.** The subject is the signature plus the evidence set, so a new source is a new subject and the kernel's receipt dedupes the rest.
+- **Hysteresis is keyed to the evidence set**, not a rate or a clock. A rate wobbles across a floor; a set only grows.
+- **Strength is distinct sources, never a count.** Counts are gauges. The default threshold: two sources agree, or one sensor sees it in every run of the window.
+- **Observers are their own list.** They must declare a closed `vocabulary` (an outsider is `new:` and needs a second source), are budgeted by `every.commits`, default to a thirty-minute timeout, and write `estimated` measurements. The actuator's brief is the evidence, never the number. An observer's model is never the actuator's with shared context (unenforced; a convention).
+- **A failed measurement is an error row, never a zero.** An instrument's output is decoded, so garbage is a failed measurement.
+- **An estimate is irreplaceable.** It cost money and cannot be recomputed. Measurements could be, but the rollup hangs on them, so both are rows.
+- **The controller's identity.** A daemon is not a person. It writes `by: controller:<name>`; a loop reads a peer as the operator who enabled it, so `via` is the rule's enabler.
+- **The controller's own tree is never the plant.** Instruments and actuators run in worktrees under the work dir. `apply` with no PR merges only into a ref checked out at the plant root, and refuses a dirty tree.
+- **Every commit the controller makes is its own.** `user.name=swell`, whatever identity the machine has or lacks.
 
 ## Proof
 
 `pnpm verify` is the one definition of done: typecheck, lint, format, every test. Lanes:
 
-- **deterministic**: `packages/tide/test/tide.test.ts`, nine scenarios over the memory store and the SQLite store. The memory store is the semantic spec; SQLite must agree.
-- **host**: `packages/tide/test/host.test.ts`, a real git plant against a bare origin: snapshot, reading, wave, policy verdict, squash merge, push, a quiet second tick, the page template, the peer door under a token, and the decide verb (401, 400, 422).
-- **unproven**: the `gh` PR path (`--gh`), the peer port between two real hosts, a model sensor, and any run on the laptop.
+- **deterministic**: `packages/swell/test/control.test.ts`, nine scenarios over the memory store and the historian, plus `defineControl` and `week`. The memory store is the semantic spec; the historian must agree.
+- **controller**: `packages/swell/test/controller.test.ts`, a real git plant against a bare origin: sample, measurement, move, auto verdict, squash merge, push, a quiet second tick, a hung and a malformed sensor, the HMI template, the peer door under a token, and the decide verb (401, 400, 422).
+- **unproven**: the `gh` PR path (`--gh`), the peer port between two real controllers, an observer, the HMI's script in a browser, and any run on the laptop.
 
 ## Run
 
 ```sh
-tide once  --config <plant>/tide.config.ts [--config <other>/tide.config.ts]   # observe, sweep, drain, exit
-tide serve --config ... --port 4747 --every 60 [--gh]                          # tick and serve the page
-tide view  --config ... --plant <id>                                            # the page's JSON
+swell once  --config <plant>/swell.config.ts [--config <other>/swell.config.ts]   # feedback, sweep, drain, exit
+swell serve --config ... --port 4747 --period 60 [--gh]                          # sample every period and serve the HMI
+swell view  --config ... --plant <id>                                             # the HMI's JSON
 ```
 
-Every verb takes `--token` or `TIDE_TOKEN`: the bearer for the peer door and the page's decide verb. Work dir defaults to `~/.tide/<host>`; the store is `tide.sqlite` there. A sensor is argv run at a clean checkout, printing `{ findings, analyzed, excluded, failed }`; it is decoded, so garbage is a failed reading, and it is killed at `timeoutMs` (default ten minutes). An actuator is argv run in a worktree with `TIDE_BRIEF` pointing at the evidence JSON, killed at `timeoutMs` (default one hour); what it leaves changed becomes the wave. Both run asynchronously, so the page and the door stay live while an agent works.
+Every verb takes `--token` or `SWELL_TOKEN`: the bearer for the peer door and the operator's decide verb. The work dir defaults to `~/.swell/<controller>`, with the historian at `historian.sqlite`. An instrument prints `{ signals, analyzed, excluded, failed }`. An actuator runs in a worktree with `SWELL_BRIEF` pointing at the evidence JSON and is killed at `timeoutMs` (default one hour); what it leaves changed becomes the move. All of them run asynchronously, so the HMI and the door stay live while an agent works.
 
-The door is one `HttpApi` contract (`door.ts`) the server and the peer client both derive from: `/facts/:table`, `/tallies/:id`, `/view`, `/health`, `/decide`. A bad limit or an unknown index is a 400, a bad token a 401, a refused verdict a 422.
-
-## Effect
-
-Audited module by module against the pinned rc.118 (`.artifacts/swarm/*.md`, 2026-10-07). Adopted: `HttpApi` for the door, `Effect.callback` plus `timeoutOrElse` for child processes, `Semaphore` plus `acquireUseRelease` for the SQLite transaction, `Schema` decoding at every edge that was a cast, `Data.TaggedError` for plant and peer errors, `effect/cli` for the verbs, `Effect.repeat` with `Schedule.spaced` for the tick. Rejected: `eventlog`, `workflow`, `cluster`, `sql` and `persistence` as a second state owner beside the facts; `Path` as POSIX-only on Windows; `FileSystem` and `Config` as surface with no bug removed; `Hash.string` as unstable across runs for a persisted key.
+The door is one `HttpApi` contract (`door.ts`), `ControllerApi`, that the server and the peer client both derive from: `/facts/:table`, `/tallies/:id`, `/view`, `/health`, `/decide`. A bad limit or an unknown index is a 400, a bad token a 401, a refused verdict a 422.
 
 ```ts
-// <plant>/tide.config.ts. A type-only import is erased by Node, so the plant installs nothing; the host validates on load.
-import type { TideSpec } from "@tc/tide";
+// <plant>/swell.config.ts. A type-only import is erased by Node, so the plant installs nothing; the controller validates on load.
+import type { ControlSpec } from "swell";
 export default {
   plant: { id: "pe-tools", kind: "git", root: ".", ref: "main", remote: "origin" },
-  sensors: [
-    { id: "fallow", kind: "measured", run: ["mise", "x", "--", "fallow", "health", "--format", "tide"] },
+  sensors: [{ id: "fallow", run: ["mise", "x", "--", "fallow", "health", "--format", "swell"] }],
+  observers: [
     {
       id: "review",
-      kind: "model",
       run: ["claude", "-p", "@review.md"],
       every: { commits: 20 },
       vocabulary: ["dup-code", "dead-export"],
@@ -75,22 +85,30 @@ export default {
   loops: [
     {
       id: "purge",
-      sense: ["fallow", "review"],
-      act: "purge",
-      gate: "pr",
-      person: "kai",
-      budget: { perDay: 1 },
+      inputs: ["fallow", "review"],
+      actuator: "purge",
+      mode: "manual",
+      operator: "kai",
+      limit: { perDay: 1 },
     },
   ],
-} satisfies TideSpec;
+} satisfies ControlSpec;
 ```
+
+## Effect
+
+Audited module by module against the pinned rc.118 (`.artifacts/swarm/*.md`, 2026-10-07). Adopted: `HttpApi` for the door, `Effect.callback` plus `timeoutOrElse` for child processes, `Semaphore` plus `acquireUseRelease` for the historian's transaction, `Schema` decoding at every edge that was a cast, `Data.TaggedError` for plant and peer errors, `effect/cli` for the verbs, `Effect.repeat` with `Schedule.spaced` for the sample period. Rejected: `eventlog`, `workflow`, `cluster`, `sql` and `persistence` as a second state owner beside the facts; `Path` as POSIX-only on Windows; `FileSystem` and `Config` as surface with no bug removed; `Hash.string` as unstable across runs for a persisted key.
 
 ## Owed
 
 - A GitHub remote (`gh` was not logged in on the build machine).
-- The kernel's `onCron` trigger stays for The Current's Convex crons; tide loops have none, because the host sweeps every rule each tick.
+- The kernel is still The Current's in its strings: the package is `@tc/kernel`, errors say `tc kernel`, spans are `tc.*`, and `graph.ts` draws TC's layers, so `control` is a layer it cannot draw. Who owns the kernel is unruled.
+- The rate limit counts proposals, not attempts: a move that fails at `propose` retries the actuator up to five times with no limit pressure. Counting attempts needs a `by_rule` index on `kernel::attempt`.
+- `rate` counts signals per run, so one run with two signals is `rate 2` and one sensor crosses the default threshold on its first run.
+- `apply` with no PR merges into the plant root; with `root: "."` that is the operator's own checkout. A controller-owned clone or a push-only apply is unruled.
+- The kernel's `onCron` trigger stays for The Current's Convex crons; swell loops have none, because the controller sweeps every rule each period.
 - A killed actuator's own children are not killed; `execFile`'s signal reaches one process.
-- The page's token lives in `localStorage`; the server is loopback-only, so the tailnet exposure the factory wanted needs a reverse proxy or a listen flag.
-- The laptop's store is the one unreplicated thing: PRs and verdicts live on GitHub, model readings do not. A nightly copy.
-- The Current: dissolve `pi::observed`, `pi::proposal`, `pi::verdict` into tide's rows; its `Proposal.apply` is a command call. `pi::link` and `pi::mark` stay as domain facts.
-- Pe.Tools: adopt after mise lands; delete `ts/packages/factory`; sensors from the factory ledger (fallow, tokei, gitleaks, guards) become `tide.config.ts` rows.
+- The HMI's token lives in `localStorage`; the server is loopback-only, so tailnet exposure needs a reverse proxy or a listen flag.
+- The laptop's historian is the one unreplicated thing: PRs and verdicts live on GitHub, estimates do not. A nightly copy.
+- The Current: dissolve `pi::observed`, `pi::proposal`, `pi::verdict` into `control::` rows; its `apply` is a command call that must run in the verdict's transaction. `pi::link` and `pi::mark` stay as domain facts.
+- Pe.Tools: adopt after mise lands; delete `ts/packages/factory`; the factory ledger's sensors (fallow, tokei, gitleaks, guards) become `swell.config.ts` rows.

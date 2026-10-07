@@ -1,8 +1,8 @@
 import { Port } from "@tc/kernel";
 import { Context, Data, Effect, Layer, Schema } from "effect";
-import { Finding, meta } from "./facts.ts";
+import { meta, Signal } from "./facts.ts";
 
-/** Every plant failure, so a host can skip one dead plant this tick and still sweep the others. */
+/** Every plant failure, so a controller can skip one dead plant this tick and still sweep the others. */
 export class PlantError extends Data.TaggedError("PlantError")<{
   readonly op: string;
   readonly message: string;
@@ -12,53 +12,72 @@ export class PlantError extends Data.TaggedError("PlantError")<{
 export interface PlantSpec {
   readonly id: string;
   readonly kind: "git";
-  /** Absolute path of the tree the host loaded this plant's config from. The plant is never the host's own tree. */
+  /** Absolute path of the tree the controller loaded this plant's config from. Never the controller's own tree. */
   readonly root: string;
   readonly ref: string;
   readonly remote?: string;
 }
 
+/** A deterministic instrument: argv run at a clean checkout of the sample, printing one JSON `Measured`. */
 export interface SensorSpec {
   readonly id: string;
-  readonly kind: "measured" | "model";
-  /** argv, run with cwd at a clean checkout of the snapshot; prints one JSON `Sensed` on stdout. */
   readonly run: ReadonlyArray<string>;
-  /** A model sensor is budgeted: run only after this many commits since its last reading. */
-  readonly every?: { readonly commits: number };
-  /** Closed vocabulary for model fingerprints; one outside it is prefixed `new:` and needs a second source to count. */
-  readonly vocabulary?: ReadonlyArray<string>;
-  /** A hung sensor is a failed reading, never a wedged host. Default ten minutes. */
+  /** A hung sensor is a failed measurement, never a wedged controller. Default ten minutes. */
   readonly timeoutMs?: number;
+}
+
+/**
+ * A model instrument: it estimates what no sensor can measure (the worst session replays, a grouping of
+ * signals) and distills it to cited signals. It costs money and cannot be recomputed, so it is budgeted by
+ * `every`, and its signatures come from a closed `vocabulary`: one outside it is `new:` and needs a second
+ * source to count.
+ */
+export interface ObserverSpec {
+  readonly id: string;
+  readonly run: ReadonlyArray<string>;
+  readonly vocabulary: ReadonlyArray<string>;
+  /** Run only after this many commits since its last estimate. */
+  readonly every?: { readonly commits: number };
+  /** Default thirty minutes: an observer is an agent. */
+  readonly timeoutMs?: number;
+}
+
+/** What one measure call runs: the instrument resolved to argv and a timeout, whichever kind it is. */
+export interface Instrument {
+  readonly id: string;
+  readonly run: ReadonlyArray<string>;
+  readonly timeoutMs: number;
 }
 
 export interface ActuatorSpec {
   readonly id: string;
-  /** argv, run with cwd at a worktree of the snapshot and `TIDE_BRIEF` set to a JSON file path. */
+  /** argv, run with cwd at a worktree of the sample and `SWELL_BRIEF` set to a JSON file path. */
   readonly run: ReadonlyArray<string>;
   /** Default one hour: an actuator is an agent and the long step. */
   readonly timeoutMs?: number;
 }
 
-/** What a sensor prints. Decoded, never cast: a malformed reading is a failed one, and `failed` keeps it from reading as a zero. */
-export const Sensed = Schema.Struct({
-  findings: Schema.Array(Finding),
+/** What an instrument prints. Decoded, never cast: a malformed measurement is a failed one, and `failed` keeps it from reading as a zero. */
+export const Measured = Schema.Struct({
+  signals: Schema.Array(Signal),
   analyzed: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
   excluded: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
   failed: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
   error: Schema.optionalKey(Schema.String),
 });
-export type Sensed = typeof Sensed.Type;
-export const SensedJson = Schema.fromJsonString(Sensed);
-export const failedSensed = (error: string): Sensed => ({
-  findings: [],
+export type Measured = typeof Measured.Type;
+export const MeasuredJson = Schema.fromJsonString(Measured);
+export const measureFailed = (error: string): Measured => ({
+  signals: [],
   analyzed: 0,
   excluded: 0,
   failed: 1,
   error,
 });
 
-export interface Head {
-  readonly snapshot: string;
+/** The plant sampled: its id at this instant and how far it moved since the last one. */
+export interface Sampled {
+  readonly sample: string;
   readonly parent?: string;
   readonly commits: number;
   readonly churn: number;
@@ -71,13 +90,14 @@ export interface Changes {
   readonly summary: string;
 }
 
+/** The evidence handed to an actuator. Never the number: the actuator is told what was seen, not what to move. */
 export interface Brief {
   readonly loop: string;
-  readonly fingerprint: string;
-  readonly snapshot: string;
+  readonly signature: string;
+  readonly sample: string;
   readonly sources: ReadonlyArray<string>;
-  readonly findings: ReadonlyArray<Finding>;
-  /** The text of the last rejection of this fingerprint, so the next attempt reads it. */
+  readonly signals: ReadonlyArray<Signal>;
+  /** The text of the last rejection of this signature, so the next attempt reads it. */
   readonly feedback: string;
 }
 
@@ -89,27 +109,27 @@ export interface Decision {
 }
 
 /**
- * The plant as a service: snapshot, sense, act, propose, observe verdicts, apply. Git is one implementation;
+ * The plant as a service: sample, measure, act, propose, read decisions, apply. Git is one implementation;
  * the kernel never sees a branch. `apply` strings are target-typed and opaque above this seam.
  */
 export interface PlantService {
-  readonly head: (plant: PlantSpec, parent: string | undefined) => Effect.Effect<Head, PlantError>;
-  readonly sense: (
+  readonly sample: (plant: PlantSpec, parent: string | undefined) => Effect.Effect<Sampled, PlantError>;
+  readonly measure: (
     plant: PlantSpec,
-    sensor: SensorSpec,
-    snapshot: string,
-  ) => Effect.Effect<Sensed, PlantError>;
+    instrument: Instrument,
+    sample: string,
+  ) => Effect.Effect<Measured, PlantError>;
   readonly act: (
     plant: PlantSpec,
     actuator: ActuatorSpec,
     brief: Brief,
   ) => Effect.Effect<Changes | null, PlantError>;
-  /** `pr`: put the changes where the plant's people decide and return a cite there. `auto`: an apply string, no gate. */
+  /** `manual`: put the changes where the operator decides and return a cite there. `auto`: an apply string, no wait. */
   readonly propose: (
     plant: PlantSpec,
     changes: Changes,
     text: string,
-    gate: "pr" | "auto",
+    mode: "manual" | "auto",
   ) => Effect.Effect<{ readonly apply: string; readonly cite: string }, PlantError>;
   readonly decisions: (
     plant: PlantSpec,
@@ -118,33 +138,33 @@ export interface PlantService {
   readonly apply: (plant: PlantSpec, apply: string) => Effect.Effect<string, PlantError>;
 }
 
-export class Plant extends Context.Service<Plant, PlantService>()("tide/Plant") {}
+export class Plant extends Context.Service<Plant, PlantService>()("swell/Plant") {}
 
 /** A scripted plant: a world the test writes, so failures are chosen rather than random. */
 export const fakeWorld = () => ({
-  heads: [] as Array<Head>,
-  sensed: new Map<string, Sensed>(),
+  samples: [] as Array<Sampled>,
+  measured: new Map<string, Measured>(),
   acts: [] as Array<Brief>,
   changes: null as Changes | null,
   proposed: [] as Array<{ changes: Changes; text: string }>,
   decisions: [] as Array<Decision>,
   applied: [] as Array<string>,
   failNext: 0,
-  headFails: false,
+  sampleFails: false,
 });
 export type FakeWorld = ReturnType<typeof fakeWorld>;
 
 export const fakePlant = (world: FakeWorld): Layer.Layer<Plant> =>
   Layer.succeed(Plant, {
-    head: (plant) =>
-      world.headFails
-        ? Effect.fail(new PlantError({ op: `head ${plant.id}`, message: "remote is down" }))
-        : Effect.sync(() => world.heads.at(-1) ?? { snapshot: "s0", commits: 0, churn: 0 }),
-    sense: (_plant, sensor, snapshot) =>
+    sample: (plant) =>
+      world.sampleFails
+        ? Effect.fail(new PlantError({ op: `sample ${plant.id}`, message: "remote is down" }))
+        : Effect.sync(() => world.samples.at(-1) ?? { sample: "s0", commits: 0, churn: 0 }),
+    measure: (_plant, instrument, sample) =>
       Effect.sync(
         () =>
-          world.sensed.get(`${sensor.id}@${snapshot}`) ??
-          failedSensed(`no scripted reading for ${sensor.id}@${snapshot}`),
+          world.measured.get(`${instrument.id}@${sample}`) ??
+          measureFailed(`no scripted measurement for ${instrument.id}@${sample}`),
       ),
     act: (_plant, _actuator, brief) =>
       Effect.gen(function* () {
@@ -175,16 +195,16 @@ export const fakePlant = (world: FakeWorld): Layer.Layer<Plant> =>
 const shared = fakeWorld();
 /** The fake layer is a shared scripted world; a test makes its own with `fakePlant(fakeWorld())` and resolves the port to it. */
 export const PlantPort = Port.make({
-  id: "tide::plant",
+  id: "control::plant",
   service: Plant,
   live: Layer.effect(
     Plant,
-    Effect.die(new Error("tide::plant live layer is provided by the host, per plant kind")),
+    Effect.die(new Error("control::plant live layer is provided by the controller, per plant kind")),
   ),
   fake: fakePlant(shared),
   meta: meta(
     "Plant",
-    "The thing a tide measures and changes: a repo, a deployment, a folder.",
+    "The thing a controller measures and moves: a repo, a deployment, a folder.",
     "git is one adapter; the core never assumes it",
   ),
 });

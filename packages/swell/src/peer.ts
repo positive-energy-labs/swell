@@ -2,8 +2,8 @@ import { type AnyFact, type Find, ofKind, Port, type Store } from "@tc/kernel";
 import { Context, Data, Effect, Layer } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api";
-import { PeerAuth, TideApi } from "./door.ts";
-import { meta, Observed } from "./facts.ts";
+import { ControllerApi, DoorAuth } from "./door.ts";
+import { Cite, meta } from "./facts.ts";
 
 export class PeerError extends Data.TaggedError("PeerError")<{
   readonly where: string;
@@ -11,7 +11,7 @@ export class PeerError extends Data.TaggedError("PeerError")<{
 }> {}
 export class UnknownIndex extends Data.TaggedError("UnknownIndex")<{ readonly message: string }> {}
 
-/** What one tide may read of another: facts by index and tallies by range, both bounded. Never a write. */
+/** What one controller may read of another: facts by index and tallies by range, both bounded. Never a write. */
 export interface PeerService {
   readonly find: (
     table: string,
@@ -27,7 +27,7 @@ export interface PeerService {
   >;
 }
 
-export class Peer extends Context.Service<Peer, PeerService>()("tide/Peer") {}
+export class Peer extends Context.Service<Peer, PeerService>()("swell/Peer") {}
 
 export const fieldsOf = (
   table: string,
@@ -41,7 +41,7 @@ export const fieldsOf = (
     : Effect.succeed(fields);
 };
 
-/** A peer over its own store, for tests and for a host reading itself. */
+/** A peer over its own store, for tests and for a controller reading itself. */
 export const peerOf = (store: Store): Layer.Layer<Peer> =>
   Layer.succeed(Peer, {
     find: (table, index, find) =>
@@ -52,12 +52,12 @@ export const peerOf = (store: Store): Layer.Layer<Peer> =>
     tallies: (projection, { gte, lt, limit }) => store.tally.range(projection, gte, lt, limit),
   });
 
-/** A peer over HTTP, derived from the same contract the host serves, under the person who enabled the reading loop. */
+/** A peer over HTTP, derived from the same contract the controller serves, under the operator who enabled the reading loop. */
 export const peerHttp = (base: string, token: string): Layer.Layer<Peer> =>
   Layer.effect(
     Peer,
     Effect.gen(function* () {
-      const c = yield* HttpApiClient.make(TideApi, {
+      const c = yield* HttpApiClient.make(ControllerApi, {
         transformClient: HttpClient.mapRequest(HttpClientRequest.prependUrl(base)),
       });
       const wrap = (where: string) =>
@@ -73,7 +73,7 @@ export const peerHttp = (base: string, token: string): Layer.Layer<Peer> =>
     }),
   ).pipe(
     Layer.provide(
-      HttpApiMiddleware.layerClient(PeerAuth, ({ next, request }) =>
+      HttpApiMiddleware.layerClient(DoorAuth, ({ next, request }) =>
         next(HttpClientRequest.bearerToken(request, token)),
       ),
     ),
@@ -81,18 +81,23 @@ export const peerHttp = (base: string, token: string): Layer.Layer<Peer> =>
   );
 
 export const PeerPort = Port.make({
-  id: "tide::peer",
+  id: "control::peer",
   service: Peer,
-  live: Layer.effect(Peer, Effect.die(new Error("tide::peer live layer is provided by the host, per peer"))),
-  fake: Layer.effect(Peer, Effect.die(new Error("tide::peer fake is peerOf(store); a test provides one"))),
+  live: Layer.effect(
+    Peer,
+    Effect.die(new Error("control::peer live layer is provided by the controller, per peer")),
+  ),
+  fake: Layer.effect(Peer, Effect.die(new Error("control::peer fake is peerOf(store); a test provides one"))),
   meta: meta(
     "Peer",
-    "Another tide, read by URN and never copied.",
-    "evidence in by URN; proposals out through the peer's gate",
+    "Another controller, read by URN and never copied.",
+    "evidence in by URN; proposals out through the peer's own operator",
   ),
 });
 
-export const urnOf = (host: string, table: string, id: string) => `tide:${host}/${table}/${id}`;
+/** A fact's address across controllers: the scheme is the domain, the authority is the controller that wrote it. */
+export const urnOf = (controller: string, table: string, id: string) =>
+  `control:${controller}/${table}/${id}`;
 
 const hash = (s: string) => {
   let h = 5381;
@@ -101,7 +106,7 @@ const hash = (s: string) => {
 };
 
 /** The row a peer fact becomes here: a pointer with a content hash, so a change elsewhere is visible without a copy. */
-export const observedOf = (host: string, table: string, row: { readonly _id: string }) => ({
-  fact: Observed,
-  draft: { urn: urnOf(host, table, row._id), source: host, hash: hash(JSON.stringify(row)) },
+export const citeOf = (controller: string, table: string, row: { readonly _id: string }) => ({
+  fact: Cite,
+  draft: { urn: urnOf(controller, table, row._id), source: controller, hash: hash(JSON.stringify(row)) },
 });

@@ -8,10 +8,11 @@ type Row = { _id: string; _creationTime: number; doc: string };
 const bind = (v: unknown) => (typeof v === "boolean" ? (v ? 1 : 0) : (v as string | number));
 
 /**
- * The kernel's Store over one SQLite file: a JSON `doc` column per table, an expression index per declared
- * fact index, tallies and snapshots as two small tables. Same semantics as the memory store, which is the spec.
+ * The controller's historian: the kernel's Store over one SQLite file. A JSON `doc` column per table, an
+ * expression index per declared fact index, tallies and snapshots as two small tables. Same semantics as the
+ * kernel's memory store, which is the spec.
  */
-export const sqliteStore = (path: string) => {
+export const historian = (path: string) => {
   const db = new DatabaseSync(path);
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -49,7 +50,7 @@ export const sqliteStore = (path: string) => {
   }
 
   // One writer at a time, and only the fiber that opened the transaction is inside it: another fiber waits, it never joins.
-  const inTx = Context.Reference<boolean>(`tide/inTx/${randomUUID()}`, { defaultValue: () => false });
+  const inTx = Context.Reference<boolean>(`swell/inTx/${randomUUID()}`, { defaultValue: () => false });
   const lock = Semaphore.makeUnsafe(1);
   const finish = (exit: Exit.Exit<unknown, unknown>) =>
     Effect.sync(() => {
@@ -164,7 +165,7 @@ export const sqliteStore = (path: string) => {
             );
         }),
     },
-    // The host sweeps every rule each tick, so a kick has nothing to wake.
+    // The controller sweeps every rule each tick, so a kick has nothing to wake.
     kick: () => Effect.void,
     transaction: (fa) =>
       Effect.gen(function* () {

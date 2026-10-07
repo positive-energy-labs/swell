@@ -6,19 +6,19 @@ import {
   type Brief,
   type Changes,
   type Decision,
-  failedSensed,
+  type Measured,
+  MeasuredJson,
+  measureFailed,
   Plant,
   PlantError,
   type PlantSpec,
-  type Sensed,
-  SensedJson,
 } from "./plant.ts";
 
-// ponytail: 8 MiB makes chatty commands explicit; stream to artifacts if a sensor outgrows it.
+// ponytail: 8 MiB makes chatty commands explicit; stream to artifacts if an instrument outgrows it.
 const maxBuffer = 8 * 1024 * 1024;
 
-/** Every commit the host makes is the host's, whatever identity the machine has or lacks. */
-const identity = ["-c", "user.name=tide", "-c", "user.email=tide@localhost"];
+/** Every commit the controller makes is the controller's, whatever identity the machine has or lacks. */
+const identity = ["-c", "user.name=swell", "-c", "user.email=swell@localhost"];
 
 /** Local git plumbing is bounded, so it stays synchronous. */
 const git = (cwd: string, ...args: ReadonlyArray<string>) =>
@@ -36,7 +36,7 @@ interface Run {
 }
 
 /**
- * Anything that can hang or talk to the network runs asynchronously: the event loop stays free for the page
+ * Anything that can hang or talk to the network runs asynchronously: the event loop stays free for the HMI
  * and the peer door, a timeout kills the child, and the kernel's interrupt path can reach it.
  */
 const run = (
@@ -82,7 +82,7 @@ const NET_MS = 120_000;
 const samePath = (a: string, b: string) =>
   normalize(resolve(a)).toLowerCase() === normalize(resolve(b)).toLowerCase();
 
-/** A run worktree must prove its own top level before any reset, add or commit; a bare leftover directory resolves to the host's tree. */
+/** A run worktree must prove its own top level before any reset, add or commit; a bare leftover directory resolves to the controller's tree. */
 const isOwnTop = (worktree: string) => {
   try {
     return samePath(git(worktree, "rev-parse", "--show-toplevel"), worktree);
@@ -139,42 +139,40 @@ const fetch = (plant: PlantSpec) =>
       });
 
 /**
- * Git as a plant. The host's own tree is never the plant: every sensor and actuator runs in a worktree under
- * `work`, and only `apply` with no PR touches the ref checked out at the plant root.
+ * Git as a plant. The controller's own tree is never the plant: every instrument and actuator runs in a
+ * worktree under `work`, and only `apply` with no PR touches the ref checked out at the plant root.
  */
 export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }): Layer.Layer<Plant> =>
   Layer.succeed(Plant, {
-    head: (plant, parent) =>
+    sample: (plant, parent) =>
       Effect.gen(function* () {
         yield* fetch(plant);
-        return yield* sync(`head ${plant.id}`, () => {
-          const snapshot = git(plant.root, "rev-parse", target(plant));
+        return yield* sync(`sample ${plant.id}`, () => {
+          const sample = git(plant.root, "rev-parse", target(plant));
           const commits =
-            parent === undefined
-              ? 0
-              : Number(git(plant.root, "rev-list", "--count", `${parent}..${snapshot}`));
-          const churn = parent === undefined ? 0 : churnOf(plant.root, parent, snapshot);
-          return { snapshot, commits, churn, ...(parent === undefined ? {} : { parent }) };
+            parent === undefined ? 0 : Number(git(plant.root, "rev-list", "--count", `${parent}..${sample}`));
+          const churn = parent === undefined ? 0 : churnOf(plant.root, parent, sample);
+          return { sample, commits, churn, ...(parent === undefined ? {} : { parent }) };
         });
       }),
 
-    sense: (plant, sensor, snapshot) =>
+    measure: (plant, instrument, sample) =>
       Effect.gen(function* () {
-        const op = `sense ${sensor.id}@${snapshot.slice(0, 7)}`;
+        const op = `measure ${instrument.id}@${sample.slice(0, 7)}`;
         const cwd = yield* sync(op, () =>
-          worktreeAt(plant.root, join(opts.work, "sense", plant.id), `tide/sense/${plant.id}`, snapshot),
+          worktreeAt(plant.root, join(opts.work, "measure", plant.id), `swell/measure/${plant.id}`, sample),
         );
-        const env = scrubbed({ TIDE_PLANT: plant.id, TIDE_SNAPSHOT: snapshot, TIDE_ROOT: plant.root });
-        // A sensor that cannot run is a failed reading, never a failed attempt: the row says what broke.
-        const r = yield* run(op, sensor.run, { cwd, env, timeoutMs: sensor.timeoutMs ?? 600_000 }).pipe(
+        const env = scrubbed({ SWELL_PLANT: plant.id, SWELL_SAMPLE: sample, SWELL_ROOT: plant.root });
+        // An instrument that cannot run is a failed measurement, never a failed attempt: the row says what broke.
+        const r = yield* run(op, instrument.run, { cwd, env, timeoutMs: instrument.timeoutMs }).pipe(
           Effect.catchTag("PlantError", (e) =>
             Effect.succeed<Run>({ status: null, stdout: "", stderr: e.message }),
           ),
         );
-        if (r.status !== 0) return failedSensed(r.stderr.trim() || `exited ${r.status}`);
-        return yield* Schema.decodeUnknownEffect(SensedJson)(r.stdout).pipe(
+        if (r.status !== 0) return measureFailed(r.stderr.trim() || `exited ${r.status}`);
+        return yield* Schema.decodeUnknownEffect(MeasuredJson)(r.stdout).pipe(
           Effect.catch((e) =>
-            Effect.succeed<Sensed>(failedSensed(`sensor output is not a Sensed: ${e.message}`)),
+            Effect.succeed<Measured>(measureFailed(`instrument output is not a Measured: ${e.message}`)),
           ),
         );
       }),
@@ -182,53 +180,49 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
     act: (plant, actuator, brief: Brief) =>
       Effect.gen(function* () {
         const op = `act ${actuator.id}`;
-        const sha7 = brief.snapshot.slice(0, 7);
-        const branch = `tide/${brief.loop}/${slug(brief.fingerprint)}-${sha7}`;
+        const sha7 = brief.sample.slice(0, 7);
+        const branch = `swell/${brief.loop}/${slug(brief.signature)}-${sha7}`;
         const { cwd, briefPath } = yield* sync(op, () => {
           const cwd = worktreeAt(
             plant.root,
             join(opts.work, "act", plant.id, brief.loop),
             branch,
-            brief.snapshot,
+            brief.sample,
           );
           const briefPath = join(
             opts.work,
             "briefs",
-            `${plant.id}-${brief.loop}-${slug(brief.fingerprint)}-${sha7}.json`,
+            `${plant.id}-${brief.loop}-${slug(brief.signature)}-${sha7}.json`,
           );
           mkdirSync(resolve(briefPath, ".."), { recursive: true });
           writeFileSync(briefPath, JSON.stringify(brief, null, 2));
           return { cwd, briefPath };
         });
         const env = scrubbed({
-          TIDE_PLANT: plant.id,
-          TIDE_SNAPSHOT: brief.snapshot,
-          TIDE_ROOT: plant.root,
-          TIDE_BRIEF: briefPath,
+          SWELL_PLANT: plant.id,
+          SWELL_SAMPLE: brief.sample,
+          SWELL_ROOT: plant.root,
+          SWELL_BRIEF: briefPath,
         });
         yield* must(op, actuator.run, { cwd, env, timeoutMs: actuator.timeoutMs ?? 3_600_000 });
         return yield* sync(op, (): Changes | null => {
           if (!isOwnTop(cwd)) throw new Error("actuator moved the worktree");
           if (git(cwd, "status", "--porcelain") === "") return null;
           git(cwd, "add", "-A");
-          git(cwd, "commit", "-q", "-m", `tide: ${brief.loop} ${brief.fingerprint} at ${sha7}`);
+          git(cwd, "commit", "-q", "-m", `swell: ${brief.loop} ${brief.signature} at ${sha7}`);
           const head = git(cwd, "rev-parse", "HEAD");
-          return {
-            ref: branch,
-            head,
-            summary: git(cwd, "diff", "--shortstat", `${brief.snapshot}..${head}`),
-          };
+          return { ref: branch, head, summary: git(cwd, "diff", "--shortstat", `${brief.sample}..${head}`) };
         });
       }),
 
-    propose: (plant, changes, text, gate) =>
+    propose: (plant, changes, text, mode) =>
       Effect.gen(function* () {
         const op = `propose ${changes.ref}`;
         const local = {
           apply: JSON.stringify({ ref: changes.ref, head: changes.head } satisfies Apply),
           cite: `git:${changes.ref}@${changes.head.slice(0, 7)}`,
         };
-        if (gate === "auto" || !opts.gh || plant.remote === undefined) return local;
+        if (mode === "auto" || !opts.gh || plant.remote === undefined) return local;
         yield* must(
           op,
           [
@@ -263,7 +257,7 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
             "--body",
             body,
             "--label",
-            "tide",
+            "swell",
           ],
           { cwd: plant.root, timeoutMs: NET_MS },
         );
@@ -304,14 +298,14 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
           yield* fetch(plant);
           return yield* sync(op, () => git(plant.root, "rev-parse", target(plant)));
         }
-        // The host merges only into a ref checked out in the plant's own tree.
+        // The controller merges only into a ref checked out in the plant's own tree.
         const sha = yield* sync(op, () => {
           const current = git(plant.root, "rev-parse", "--abbrev-ref", "HEAD");
           if (current !== plant.ref)
             throw new Error(`plant root has ${current} checked out, not ${plant.ref}`);
           if (git(plant.root, "status", "--porcelain") !== "") throw new Error("plant root is dirty");
           git(plant.root, "merge", "-q", "--squash", a.head);
-          git(plant.root, "commit", "-q", "-m", `tide: ${a.ref}`);
+          git(plant.root, "commit", "-q", "-m", `swell: ${a.ref}`);
           return git(plant.root, "rev-parse", "HEAD");
         });
         if (plant.remote !== undefined) {
