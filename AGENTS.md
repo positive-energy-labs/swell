@@ -46,7 +46,7 @@ Control theory, all the way down (Kai, 2026-10-07). The words are established so
 - **The controller's identity.** A daemon is not a person. It writes `by: controller:<name>`; a loop reads a peer as the operator who enabled it, so `via` is the rule's enabler.
 - **The controller's own tree is never the plant.** Instruments and actuators run in worktrees under the work dir. `apply` with no PR merges only into a ref checked out at the plant root, and refuses a dirty tree.
 - **Every commit the controller makes is its own.** `user.name=swell`, whatever identity the machine has or lacks.
-- **The kernel is swell's** (`@swell/kernel`, Kai 2026-10-07). It carries no domain's words: a domain names its own graph layers (`Graph.declare(..., layers)`), and The Current passes its four.
+- **The kernel is swell's** (`@swell/kernel`, Kai 2026-10-07). It carries no domain's words: a domain names its own graph layers (`Graph.declare(..., layers)`), and The Current passes its four. A consumer vendors it as a workspace package (The Current: `pnpm vendor:kernel`, which records the swell commit), never as a `file:` or registry dependency: the kernel ships TypeScript source, and Node will not strip types under `node_modules`. A change goes to swell first and comes back through the script; a vendored copy is never patched.
 
 ## Proof
 
