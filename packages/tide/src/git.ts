@@ -7,8 +7,10 @@ import { type Changes, type Decision, Plant, type Sensed } from "./plant.ts";
 // ponytail: 8 MiB makes chatty commands explicit; stream to artifacts if a sensor outgrows it.
 const maxBuffer = 8 * 1024 * 1024;
 
+/** Every commit the host makes is the host's, whatever identity the machine has or lacks. */
+const identity = ["-c", "user.name=tide", "-c", "user.email=tide@localhost"];
 const git = (cwd: string, ...args: ReadonlyArray<string>) =>
-  execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer }).trim();
+  execFileSync("git", ["-C", cwd, ...identity, ...args], { encoding: "utf8", maxBuffer }).trim();
 const gh = (cwd: string, ...args: ReadonlyArray<string>) =>
   execFileSync("gh", args, { cwd, encoding: "utf8", maxBuffer }).trim();
 

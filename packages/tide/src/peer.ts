@@ -1,4 +1,4 @@
-import { type AnyFact, type Find, lookup, Port, type Store } from "@tc/kernel";
+import { type AnyFact, type Find, ofKind, Port, type Store } from "@tc/kernel";
 import { Context, Effect, Layer } from "effect";
 import { meta, Observed } from "./facts.ts";
 
@@ -18,7 +18,7 @@ export interface PeerService {
 export class Peer extends Context.Service<Peer, PeerService>()("tide/Peer") {}
 
 export const fieldsOf = (table: string, index: string): ReadonlyArray<string> => {
-  const fact = lookup(table) as AnyFact | undefined;
+  const fact = (ofKind("fact") as ReadonlyArray<AnyFact>).find((f) => f.table === table);
   const fields = fact?.indexes[index] as ReadonlyArray<string> | undefined;
   if (fields === undefined) throw new Error(`no index ${index} on ${table}`);
   return fields;

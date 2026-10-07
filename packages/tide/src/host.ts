@@ -102,8 +102,11 @@ export const makeHost = (opts: HostOptions) => {
     yield* enable;
     for (const t of tides) {
       yield* observe(t);
-      for (const rule of t.rules) yield* sim.sweep(rule);
-      yield* sim.drain;
+      // Drain after each sweep: a loop reads the readings the sense rule just wrote.
+      for (const rule of t.rules) {
+        yield* sim.sweep(rule);
+        yield* sim.drain;
+      }
     }
   });
 
