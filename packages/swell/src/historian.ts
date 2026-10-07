@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { type AnyFact, type Find, ofKind, type Store } from "@tc/kernel";
+import { type AnyFact, type Find, ofKind, type Store } from "@swell/kernel";
 import { Context, Effect, Exit, Option, Semaphore } from "effect";
 
 type Row = { _id: string; _creationTime: number; doc: string };

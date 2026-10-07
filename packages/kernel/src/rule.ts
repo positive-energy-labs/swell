@@ -104,7 +104,7 @@ export const make = <
     effect: isStub(effect)
       ? () => Effect.die(new NotImplemented({ id: def.id, intent: intentOf(effect) }))
       : Effect.fn(def.id)(function* (subject: S) {
-          yield* Effect.annotateCurrentSpan({ "tc.kind": "rule", "tc.subject": subject.urn });
+          yield* Effect.annotateCurrentSpan({ "kernel.kind": "rule", "kernel.subject": subject.urn });
           return yield* effect(subject);
         }),
     meta: def.meta,

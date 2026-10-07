@@ -65,11 +65,15 @@ const uniq = (xs: ReadonlyArray<string>) => [...new Set(xs)];
 const ne = <K extends string>(k: K, xs: ReadonlyArray<string>) =>
   (xs.length > 0 ? { [k]: uniq(xs) } : {}) as unknown as { [P in K]?: ReadonlyArray<string> };
 
+/** A domain names its own layers: what each one means to the people reading the graph. */
+export type Layers = Readonly<Record<string, { readonly label: string; readonly means: string }>>;
+
 export const declare = (
   prims: ReadonlyArray<Primitive>,
   actors: ReadonlyArray<Actor>,
   stories: ReadonlyArray<Story>,
-): { layers: object; kinds: object; nodes: ReadonlyArray<Node>; stories: ReadonlyArray<Story> } => {
+  layers: Layers,
+): { layers: Layers; kinds: object; nodes: ReadonlyArray<Node>; stories: ReadonlyArray<Story> } => {
   const usedPorts = new Set(
     prims.flatMap((p) => (p.kind === "rule" ? p.uses.map((u: { id: string }) => u.id) : [])),
   );
@@ -156,24 +160,14 @@ export const declare = (
         break;
     }
   }
-  return { layers: LAYERS, kinds: KINDS, nodes, stories };
-};
-
-export const LAYERS = {
-  core: { label: "TC core", means: "The firm's own records and the rules that act on them." },
-  pi: { label: "PI", means: "Project Intelligence: what happened elsewhere and what it seems to mean." },
-  integrations: {
-    label: "Integrations",
-    means: "Doors to and from the outside world: Gmail, Drive, Xero, Chat, Revit.",
-  },
-  people: { label: "People", means: "The humans and agents who touch the system." },
+  return { layers, kinds: KINDS, nodes, stories };
 };
 
 export const KINDS = {
   entry: { label: "Entry point", means: "A door: a person's command, or something arriving from outside." },
   fact: { label: "Fact", means: "Something that happened or was promised, stored once and never rewritten." },
   rule: { label: "Rule", means: "A standing instruction: 'this should exist; if it does not, do it'." },
-  effect: { label: "Effect", means: "A call out to another product (Drive, Gmail, Xero, Chat)." },
+  effect: { label: "Effect", means: "A call out to another system, through a port." },
   view: { label: "View", means: "A screen a human reads. It only shows facts; it owns nothing." },
   actor: { label: "Person or agent", means: "Someone who acts on the system or reads it." },
 };

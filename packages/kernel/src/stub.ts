@@ -5,7 +5,7 @@ export class NotImplemented extends Schema.TaggedError<NotImplemented>()("NotImp
   intent: Schema.String,
 }) {}
 
-const STUB = Symbol.for("tc/stub");
+const STUB = Symbol.for("swell/kernel/stub");
 /** A branded placeholder, not a function, so it never blurs the contextual type of a real body. */
 export interface Stub {
   readonly [STUB]: string;

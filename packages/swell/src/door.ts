@@ -1,4 +1,4 @@
-import { InvariantViolation, Unauthorized } from "@tc/kernel";
+import { InvariantViolation, Unauthorized } from "@swell/kernel";
 import { Schema } from "effect";
 import {
   HttpApi,

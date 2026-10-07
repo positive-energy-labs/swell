@@ -1,4 +1,4 @@
-import { Fact, type Meta, Projection, type Reader } from "@tc/kernel";
+import { Fact, type Meta, Projection, type Reader } from "@swell/kernel";
 import { Effect, Schema } from "effect";
 
 export const meta = (label: string, plain: string, src: string): Meta => ({

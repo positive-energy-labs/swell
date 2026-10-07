@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { NodeHttpServer } from "@effect/platform-node";
-import { type AnyPort, Kernel, Memory, type Store, transact } from "@tc/kernel";
+import { type AnyPort, Kernel, Memory, type Store, transact } from "@swell/kernel";
 import { Clock, Effect, Layer, Redacted, Schedule } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";

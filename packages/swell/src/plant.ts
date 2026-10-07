@@ -1,4 +1,4 @@
-import { Port } from "@tc/kernel";
+import { Port } from "@swell/kernel";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import { meta, Signal } from "./facts.ts";
 

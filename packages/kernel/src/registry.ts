@@ -18,14 +18,14 @@ export type Primitive =
 export class DuplicateId extends Error {
   readonly id: string;
   constructor(id: string) {
-    super(`tc kernel: primitive id '${id}' is registered twice`);
+    super(`kernel: primitive id '${id}' is registered twice`);
     this.id = id;
   }
 }
 export class InvalidId extends Error {
   readonly id: string;
   constructor(id: string) {
-    super(`tc kernel: primitive id '${id}' is not 'namespace::kebab-name'`);
+    super(`kernel: primitive id '${id}' is not 'namespace::kebab-name'`);
     this.id = id;
   }
 }

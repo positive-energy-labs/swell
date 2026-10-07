@@ -1,4 +1,4 @@
-import { type AnyFact, Command, Entry, type Reader, Rule, violation } from "@tc/kernel";
+import { type AnyFact, Command, Entry, type Reader, Rule, violation } from "@swell/kernel";
 import { Effect, Schema } from "effect";
 import {
   Measurement,

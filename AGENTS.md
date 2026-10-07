@@ -1,6 +1,6 @@
 # swell
 
-Evidence in, moves out. A controller watches a plant, lets evidence pile up as facts, and moves the plant once the evidence crosses a threshold, each move gated by its operator. General over targets: a git repo, The Current's fact log, a Drive folder, PostHog replays. Two packages: `packages/kernel` (facts, rules, ports, receipts; copied from The Current at `8c5c0bb`) and `packages/swell` (the loop as kernel primitives, a git plant, a SQLite historian, a controller with its door and HMI).
+Evidence in, moves out. A controller watches a plant, lets evidence pile up as facts, and moves the plant once the evidence crosses a threshold, each move gated by its operator. General over targets: a git repo, The Current's fact log, a Drive folder, PostHog replays. Two packages: `packages/kernel` (`@swell/kernel`: facts, rules, ports, receipts; born in The Current at `8c5c0bb`) and `packages/swell` (the loop as kernel primitives, a git plant, a SQLite historian, a controller with its door and HMI).
 
 **The code is the spec.** Rulings live in `meta(..., "why")` on each primitive and in commit messages. This file holds only what code cannot say.
 
@@ -46,6 +46,7 @@ Control theory, all the way down (Kai, 2026-10-07). The words are established so
 - **The controller's identity.** A daemon is not a person. It writes `by: controller:<name>`; a loop reads a peer as the operator who enabled it, so `via` is the rule's enabler.
 - **The controller's own tree is never the plant.** Instruments and actuators run in worktrees under the work dir. `apply` with no PR merges only into a ref checked out at the plant root, and refuses a dirty tree.
 - **Every commit the controller makes is its own.** `user.name=swell`, whatever identity the machine has or lacks.
+- **The kernel is swell's** (`@swell/kernel`, Kai 2026-10-07). It carries no domain's words: a domain names its own graph layers (`Graph.declare(..., layers)`), and The Current passes its four.
 
 ## Proof
 
@@ -102,7 +103,6 @@ Audited module by module against the pinned rc.118 (`.artifacts/swarm/*.md`, 202
 ## Owed
 
 - A GitHub remote (`gh` was not logged in on the build machine).
-- The kernel is still The Current's in its strings: the package is `@tc/kernel`, errors say `tc kernel`, spans are `tc.*`, and `graph.ts` draws TC's layers, so `control` is a layer it cannot draw. Who owns the kernel is unruled.
 - The rate limit counts proposals, not attempts: a move that fails at `propose` retries the actuator up to five times with no limit pressure. Counting attempts needs a `by_rule` index on `kernel::attempt`.
 - `rate` counts signals per run, so one run with two signals is `rate 2` and one sensor crosses the default threshold on its first run.
 - `apply` with no PR merges into the plant root; with `root: "."` that is the operator's own checkout. A controller-owned clone or a push-only apply is unruled.

@@ -59,7 +59,7 @@ export interface WriteCtx {
 
 const bounded = (find: Find): Find => {
   if (!(find.limit > 0 && find.limit <= MAX_LIMIT)) {
-    throw new Error(`tc kernel: read limit ${find.limit} is outside (0, ${MAX_LIMIT}]`);
+    throw new Error(`kernel: read limit ${find.limit} is outside (0, ${MAX_LIMIT}]`);
   }
   return find;
 };

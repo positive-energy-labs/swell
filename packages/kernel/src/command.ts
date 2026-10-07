@@ -10,7 +10,7 @@ import { isStub, NotImplemented, intentOf, type Stub } from "./stub.ts";
 /** An agent that acts for a person; a domain narrows it to its own names. */
 export type Agent = string;
 /**
- * Who is acting. Roles are TC facts (memberships, access grants), not Clerk facts.
+ * Who is acting. Roles come from the domain's own facts, not from the identity provider.
  * An agent acts as `agent:<name>` with `via` naming the person it acts for.
  */
 export interface Actor {
@@ -84,7 +84,7 @@ export const make = <
   const run = isStub(body)
     ? () => Effect.die(new NotImplemented({ id: def.id, intent: intentOf(body) }))
     : Effect.fn(def.id)(function* (args: Schema.Struct<Args>["Type"], ctx: CommandCtx<R, W>) {
-        yield* Effect.annotateCurrentSpan({ "tc.actor": ctx.actor.by, "tc.kind": "command" });
+        yield* Effect.annotateCurrentSpan({ "kernel.actor": ctx.actor.by, "kernel.kind": "command" });
         return yield* body(args, ctx);
       });
   return register({

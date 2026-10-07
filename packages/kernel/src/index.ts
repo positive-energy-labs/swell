@@ -1,5 +1,5 @@
 /**
- * The TC kernel: six primitives. Each is a value made by a constructor that registers it, so the
+ * The kernel: six primitives. Each is a value made by a constructor that registers it, so the
  * registry and the static types are the same values. The law: primitives never call
  * primitives; they meet only through facts (Db) and ports (Effect services).
  */

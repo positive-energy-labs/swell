@@ -1,4 +1,4 @@
-import { type AnyFact, type Find, ofKind, Port, type Store } from "@tc/kernel";
+import { type AnyFact, type Find, ofKind, Port, type Store } from "@swell/kernel";
 import { Context, Data, Effect, Layer } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { HttpApiClient, HttpApiMiddleware } from "effect/http-api";

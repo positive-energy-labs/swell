@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { type AnyRule, Kernel, Memory, type Store, transact } from "@tc/kernel";
+import { type AnyRule, Kernel, Memory, type Store, transact } from "@swell/kernel";
 import { Clock, Effect } from "effect";
 import { TestClock } from "effect/testing";
 import { historian } from "../src/historian.ts";
