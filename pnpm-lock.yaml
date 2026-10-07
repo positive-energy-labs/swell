@@ -56,6 +56,31 @@ importers:
         specifier: 5.0.1
         version: 5.0.1(@types/node@25.6.2)(@vitest/browser-preview@5.0.1)(@vitest/ui@5.0.1(vitest@5.0.1))(@voidzero-dev/vite-plus-core@1.0.0(@types/node@25.6.2)(typescript@7.0.2))
 
+  packages/tide:
+    dependencies:
+      '@tc/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      effect:
+        specifier: 4.0.0-rc.118
+        version: 4.0.0-rc.118
+    devDependencies:
+      '@effect/vitest':
+        specifier: 4.0.0-rc.118
+        version: 4.0.0-rc.118(effect@4.0.0-rc.118)(vitest@5.0.1)
+      '@types/node':
+        specifier: 25.6.2
+        version: 25.6.2
+      vite:
+        specifier: npm:@voidzero-dev/vite-plus-core@1.0.0
+        version: '@voidzero-dev/vite-plus-core@1.0.0(@types/node@25.6.2)(typescript@7.0.2)'
+      vite-plus:
+        specifier: 1.0.0
+        version: 1.0.0(@types/node@25.6.2)(@vitest/ui@5.0.1(vitest@5.0.1))(typescript@7.0.2)
+      vitest:
+        specifier: 5.0.1
+        version: 5.0.1(@types/node@25.6.2)(@vitest/browser-preview@5.0.1)(@vitest/ui@5.0.1(vitest@5.0.1))(@voidzero-dev/vite-plus-core@1.0.0(@types/node@25.6.2)(typescript@7.0.2))
+
 packages:
 
   '@babel/code-frame@7.29.7':
