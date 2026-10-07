@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Effect } from "effect";
 import { makeHost } from "./host.ts";
-import type { TideSpec } from "./loop.ts";
+import { defineTide, type TideSpec } from "./loop.ts";
 
 const usage = `tide once|serve|view [--config <tide.config.ts>]... [--work <dir>] [--db <file>] [--port <n>] [--name <host>] [--gh] [--token <t>]
   once   observe, sweep, drain, exit
@@ -32,7 +32,8 @@ const tides: Array<TideSpec> = [];
 for (const c of configs) {
   const path = resolve(c);
   const mod = (await import(pathToFileURL(path).href)) as { default: TideSpec };
-  const spec = mod.default;
+  // A config needs no runtime import of @tc/tide: a type-only import is erased, and the host validates here.
+  const spec = defineTide(mod.default);
   tides.push({ ...spec, plant: { ...spec.plant, root: resolve(dirname(path), spec.plant.root) } });
 }
 

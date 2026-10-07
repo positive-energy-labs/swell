@@ -6,12 +6,12 @@ Evidence in, waves out. A background loop that watches a plant, lets evidence pi
 
 ## Nouns
 
-| Noun | What it is | Who mints its id |
-|---|---|---|
-| **plant** | what a loop measures: a repo at a sha, a deployment at a time, a folder | the origin, never tide |
-| **host** | one process, one store, many plants: a laptop daemon, or Convex | tide; the one minted name |
-| **loop** | one row of a plant's `tide.config.ts` | the plant, as `<plant>/<loop>` |
-| **fact** | reading, snapshot, proposal, verdict, observed | the host that wrote it, as `tide:<host>/<table>/<id>` |
+| Noun      | What it is                                                              | Who mints its id                                      |
+| --------- | ----------------------------------------------------------------------- | ----------------------------------------------------- |
+| **plant** | what a loop measures: a repo at a sha, a deployment at a time, a folder | the origin, never tide                                |
+| **host**  | one process, one store, many plants: a laptop daemon, or Convex         | tide; the one minted name                             |
+| **loop**  | one row of a plant's `tide.config.ts`                                   | the plant, as `<plant>/<loop>`                        |
+| **fact**  | reading, snapshot, proposal, verdict, observed                          | the host that wrote it, as `tide:<host>/<table>/<id>` |
 
 A signal is never a row: it rides inside a reading and the issues rollup folds it by fingerprint. An issue is a tally, never a row. A wave is one loop acting once on one fingerprint; the receipt is its history entry.
 
@@ -51,17 +51,32 @@ tide view  --config ... --plant <id>                                            
 Work dir defaults to `~/.tide/<host>`; the store is `tide.sqlite` there. A sensor is argv run at a clean checkout, printing `{ findings, analyzed, excluded, failed }`. An actuator is argv run in a worktree with `TIDE_BRIEF` pointing at the evidence JSON; what it leaves changed becomes the wave.
 
 ```ts
-// <plant>/tide.config.ts
-import { defineTide } from "@tc/tide";
-export default defineTide({
+// <plant>/tide.config.ts. A type-only import is erased by Node, so the plant installs nothing; the host validates on load.
+import type { TideSpec } from "@tc/tide";
+export default {
   plant: { id: "pe-tools", kind: "git", root: ".", ref: "main", remote: "origin" },
   sensors: [
     { id: "fallow", kind: "measured", run: ["mise", "x", "--", "fallow", "health", "--format", "tide"] },
-    { id: "review", kind: "model", run: ["claude", "-p", "@review.md"], every: { commits: 20 }, vocabulary: ["dup-code", "dead-export"] },
+    {
+      id: "review",
+      kind: "model",
+      run: ["claude", "-p", "@review.md"],
+      every: { commits: 20 },
+      vocabulary: ["dup-code", "dead-export"],
+    },
   ],
   actuators: [{ id: "purge", run: ["claude", "-p", "@purge.md"] }],
-  loops: [{ id: "purge", sense: ["fallow", "review"], act: "purge", gate: "pr", person: "kai", budget: { perDay: 1 } }],
-});
+  loops: [
+    {
+      id: "purge",
+      sense: ["fallow", "review"],
+      act: "purge",
+      gate: "pr",
+      person: "kai",
+      budget: { perDay: 1 },
+    },
+  ],
+} satisfies TideSpec;
 ```
 
 ## Owed
