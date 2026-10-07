@@ -13,7 +13,7 @@ const shared = {
   work: Flag.String("work").pipe(Flag.optional),
   db: Flag.String("db").pipe(Flag.optional),
   name: Flag.String("name").pipe(Flag.optional),
-  gh: Flag.Boolean("gh"),
+  gh: Flag.Boolean("gh").pipe(Flag.withDefault(false)),
   /** Off argv and shell history when it comes from `TIDE_TOKEN`; redacted when logged either way. */
   token: Flag.Redacted("token").pipe(Flag.withFallbackConfig(Config.Redacted("TIDE_TOKEN"))),
 };
