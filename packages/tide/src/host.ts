@@ -224,7 +224,7 @@ export const makeHost = (opts: HostOptions) => {
   return { store, sim, tides, enable, tick, run, decide, view, serve, close: () => sqlite.close() };
 };
 
-/** A read-only gauge with one verb. Proven by a DOM assertion, never by a description. */
+/** A read-only gauge with one verb. The test checks the template, not a DOM: the script has never run under proof. */
 const page = (plants: ReadonlyArray<string>) => `<!doctype html>
 <meta charset="utf-8"><title>tide</title>
 <style>body{font:14px system-ui;margin:2rem;max-width:72rem}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:.3rem .5rem;text-align:left;vertical-align:top}code{font-size:12px}button{margin-right:.3rem}</style>

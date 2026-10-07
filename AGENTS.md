@@ -36,8 +36,8 @@ A signal is never a row: it rides inside a reading and the issues rollup folds i
 
 `pnpm verify` is the one definition of done: typecheck, lint, format, every test. Lanes:
 
-- **deterministic**: `packages/tide/test/tide.test.ts`, seven scenarios over the memory store and the SQLite store. The memory store is the semantic spec; SQLite must agree.
-- **host**: `packages/tide/test/host.test.ts`, a real git plant against a bare origin: snapshot, reading, wave, policy verdict, squash merge, push, a quiet second tick, the page, and the peer door under a token.
+- **deterministic**: `packages/tide/test/tide.test.ts`, nine scenarios over the memory store and the SQLite store. The memory store is the semantic spec; SQLite must agree.
+- **host**: `packages/tide/test/host.test.ts`, a real git plant against a bare origin: snapshot, reading, wave, policy verdict, squash merge, push, a quiet second tick, the page template, the peer door under a token, and the decide verb (401, 400, 422).
 - **unproven**: the `gh` PR path (`--gh`), the peer port between two real hosts, a model sensor, and any run on the laptop.
 
 ## Run
