@@ -13,13 +13,13 @@
     "test": "vp test"
   },
   "dependencies": {
-    "effect": "catalog:"
+    "effect": "4.0.0-rc.118"
   },
   "devDependencies": {
-    "@effect/vitest": "catalog:",
-    "@types/node": "catalog:",
-    "vite": "catalog:",
-    "vite-plus": "catalog:",
-    "vitest": "catalog:"
+    "@effect/vitest": "4.0.0-rc.118",
+    "@types/node": "25.6.2",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
+    "vite-plus": "1.0.0",
+    "vitest": "5.0.1"
   }
 }
