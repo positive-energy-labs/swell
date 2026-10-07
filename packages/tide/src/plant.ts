@@ -1,6 +1,13 @@
 import { Port } from "@tc/kernel";
-import { Context, Effect, Layer } from "effect";
-import { type Finding, meta } from "./facts.ts";
+import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Finding, meta } from "./facts.ts";
+
+/** Every plant failure, so a host can skip one dead plant this tick and still sweep the others. */
+export class PlantError extends Data.TaggedError("PlantError")<{
+  readonly op: string;
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
 
 export interface PlantSpec {
   readonly id: string;
@@ -20,22 +27,35 @@ export interface SensorSpec {
   readonly every?: { readonly commits: number };
   /** Closed vocabulary for model fingerprints; one outside it is prefixed `new:` and needs a second source to count. */
   readonly vocabulary?: ReadonlyArray<string>;
+  /** A hung sensor is a failed reading, never a wedged host. Default ten minutes. */
+  readonly timeoutMs?: number;
 }
 
 export interface ActuatorSpec {
   readonly id: string;
   /** argv, run with cwd at a worktree of the snapshot and `TIDE_BRIEF` set to a JSON file path. */
   readonly run: ReadonlyArray<string>;
+  /** Default one hour: an actuator is an agent and the long step. */
+  readonly timeoutMs?: number;
 }
 
-/** What a sensor prints. `failed` and `error` keep a broken run from reading as a zero. */
-export interface Sensed {
-  readonly findings: ReadonlyArray<Finding>;
-  readonly analyzed: number;
-  readonly excluded: number;
-  readonly failed: number;
-  readonly error?: string;
-}
+/** What a sensor prints. Decoded, never cast: a malformed reading is a failed one, and `failed` keeps it from reading as a zero. */
+export const Sensed = Schema.Struct({
+  findings: Schema.Array(Finding),
+  analyzed: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  excluded: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  failed: Schema.Finite.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  error: Schema.optionalKey(Schema.String),
+});
+export type Sensed = typeof Sensed.Type;
+export const SensedJson = Schema.fromJsonString(Sensed);
+export const failedSensed = (error: string): Sensed => ({
+  findings: [],
+  analyzed: 0,
+  excluded: 0,
+  failed: 1,
+  error,
+});
 
 export interface Head {
   readonly snapshot: string;
@@ -73,25 +93,29 @@ export interface Decision {
  * the kernel never sees a branch. `apply` strings are target-typed and opaque above this seam.
  */
 export interface PlantService {
-  readonly head: (plant: PlantSpec, parent: string | undefined) => Effect.Effect<Head, Error>;
-  readonly sense: (plant: PlantSpec, sensor: SensorSpec, snapshot: string) => Effect.Effect<Sensed, Error>;
+  readonly head: (plant: PlantSpec, parent: string | undefined) => Effect.Effect<Head, PlantError>;
+  readonly sense: (
+    plant: PlantSpec,
+    sensor: SensorSpec,
+    snapshot: string,
+  ) => Effect.Effect<Sensed, PlantError>;
   readonly act: (
     plant: PlantSpec,
     actuator: ActuatorSpec,
     brief: Brief,
-  ) => Effect.Effect<Changes | null, Error>;
+  ) => Effect.Effect<Changes | null, PlantError>;
   /** `pr`: put the changes where the plant's people decide and return a cite there. `auto`: an apply string, no gate. */
   readonly propose: (
     plant: PlantSpec,
     changes: Changes,
     text: string,
     gate: "pr" | "auto",
-  ) => Effect.Effect<{ readonly apply: string; readonly cite: string }, Error>;
+  ) => Effect.Effect<{ readonly apply: string; readonly cite: string }, PlantError>;
   readonly decisions: (
     plant: PlantSpec,
     applies: ReadonlyArray<string>,
-  ) => Effect.Effect<ReadonlyArray<Decision>, Error>;
-  readonly apply: (plant: PlantSpec, apply: string) => Effect.Effect<string, Error>;
+  ) => Effect.Effect<ReadonlyArray<Decision>, PlantError>;
+  readonly apply: (plant: PlantSpec, apply: string) => Effect.Effect<string, PlantError>;
 }
 
 export class Plant extends Context.Service<Plant, PlantService>()("tide/Plant") {}
@@ -106,28 +130,27 @@ export const fakeWorld = () => ({
   decisions: [] as Array<Decision>,
   applied: [] as Array<string>,
   failNext: 0,
+  headFails: false,
 });
 export type FakeWorld = ReturnType<typeof fakeWorld>;
 
 export const fakePlant = (world: FakeWorld): Layer.Layer<Plant> =>
   Layer.succeed(Plant, {
-    head: () => Effect.sync(() => world.heads.at(-1) ?? { snapshot: "s0", commits: 0, churn: 0 }),
+    head: (plant) =>
+      world.headFails
+        ? Effect.fail(new PlantError({ op: `head ${plant.id}`, message: "remote is down" }))
+        : Effect.sync(() => world.heads.at(-1) ?? { snapshot: "s0", commits: 0, churn: 0 }),
     sense: (_plant, sensor, snapshot) =>
       Effect.sync(
         () =>
-          world.sensed.get(`${sensor.id}@${snapshot}`) ?? {
-            findings: [],
-            analyzed: 0,
-            excluded: 0,
-            failed: 1,
-            error: `no scripted reading for ${sensor.id}@${snapshot}`,
-          },
+          world.sensed.get(`${sensor.id}@${snapshot}`) ??
+          failedSensed(`no scripted reading for ${sensor.id}@${snapshot}`),
       ),
     act: (_plant, _actuator, brief) =>
       Effect.gen(function* () {
         if (world.failNext > 0) {
           world.failNext--;
-          return yield* Effect.fail(new Error("actuator crashed"));
+          return yield* Effect.fail(new PlantError({ op: "act", message: "actuator crashed" }));
         }
         world.acts.push(brief);
         return world.changes;

@@ -1,6 +1,15 @@
 import { type AnyFact, type Find, ofKind, Port, type Store } from "@tc/kernel";
-import { Context, Effect, Layer } from "effect";
+import { Context, Data, Effect, Layer } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { HttpApiClient, HttpApiMiddleware } from "effect/http-api";
+import { PeerAuth, TideApi } from "./door.ts";
 import { meta, Observed } from "./facts.ts";
+
+export class PeerError extends Data.TaggedError("PeerError")<{
+  readonly where: string;
+  readonly message: string;
+}> {}
+export class UnknownIndex extends Data.TaggedError("UnknownIndex")<{ readonly message: string }> {}
 
 /** What one tide may read of another: facts by index and tallies by range, both bounded. Never a write. */
 export interface PeerService {
@@ -8,55 +17,68 @@ export interface PeerService {
     table: string,
     index: string,
     find: Find,
-  ) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, Error>;
+  ) => Effect.Effect<ReadonlyArray<Record<string, unknown>>, PeerError>;
   readonly tallies: (
     projection: string,
     range: { readonly gte: string; readonly lt: string; readonly limit: number },
-  ) => Effect.Effect<ReadonlyArray<{ readonly key: string; readonly value: Record<string, number> }>, Error>;
+  ) => Effect.Effect<
+    ReadonlyArray<{ readonly key: string; readonly value: Record<string, number> }>,
+    PeerError
+  >;
 }
 
 export class Peer extends Context.Service<Peer, PeerService>()("tide/Peer") {}
 
-export const fieldsOf = (table: string, index: string): ReadonlyArray<string> => {
-  const fact = (ofKind("fact") as ReadonlyArray<AnyFact>).find((f) => f.table === table);
-  const fields = fact?.indexes[index] as ReadonlyArray<string> | undefined;
-  if (fields === undefined) throw new Error(`no index ${index} on ${table}`);
-  return fields;
+export const fieldsOf = (
+  table: string,
+  index: string,
+): Effect.Effect<ReadonlyArray<string>, UnknownIndex> => {
+  const fields = (ofKind("fact") as ReadonlyArray<AnyFact>).find((f) => f.table === table)?.indexes[index] as
+    | ReadonlyArray<string>
+    | undefined;
+  return fields === undefined
+    ? Effect.fail(new UnknownIndex({ message: `no index ${index} on ${table}` }))
+    : Effect.succeed(fields);
 };
 
 /** A peer over its own store, for tests and for a host reading itself. */
 export const peerOf = (store: Store): Layer.Layer<Peer> =>
   Layer.succeed(Peer, {
-    find: (table, index, find) => store.find(table, index, fieldsOf(table, index), find),
+    find: (table, index, find) =>
+      fieldsOf(table, index).pipe(
+        Effect.mapError((e) => new PeerError({ where: table, message: e.message })),
+        Effect.flatMap((fields) => store.find(table, index, fields, find)),
+      ),
     tallies: (projection, { gte, lt, limit }) => store.tally.range(projection, gte, lt, limit),
   });
 
-/** A peer over HTTP: the host's read-only door, under the person who enabled the reading loop. */
-export const peerHttp = (base: string, token: string): Layer.Layer<Peer> => {
-  const get = (path: string, params: Record<string, string | number | boolean | undefined>) =>
-    Effect.tryPromise({
-      try: async () => {
-        const url = new URL(path, base);
-        for (const [k, v] of Object.entries(params)) if (v !== undefined) url.searchParams.set(k, String(v));
-        const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
-        if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-        return (await r.json()) as never;
-      },
-      catch: (e) => new Error(`peer ${base}${path}: ${e instanceof Error ? e.message : String(e)}`),
-    });
-  return Layer.succeed(Peer, {
-    find: (table, index, f) =>
-      get(`/facts/${table}`, {
-        index,
-        eq: f.eq === undefined ? undefined : JSON.stringify(f.eq),
-        gte: f.gte,
-        lt: f.lt,
-        order: f.order,
-        limit: f.limit,
-      }),
-    tallies: (projection, r) => get(`/tallies/${projection}`, r),
-  });
-};
+/** A peer over HTTP, derived from the same contract the host serves, under the person who enabled the reading loop. */
+export const peerHttp = (base: string, token: string): Layer.Layer<Peer> =>
+  Layer.effect(
+    Peer,
+    Effect.gen(function* () {
+      const c = yield* HttpApiClient.make(TideApi, {
+        transformClient: HttpClient.mapRequest(HttpClientRequest.prependUrl(base)),
+      });
+      const wrap = (where: string) =>
+        Effect.mapError(
+          (e: unknown) =>
+            new PeerError({ where: `${base} ${where}`, message: e instanceof Error ? e.message : String(e) }),
+        );
+      return {
+        find: (table, index, { eq, gte, lt, order, limit }) =>
+          c.peer.facts({ params: { table }, query: { index, eq, gte, lt, order, limit } }).pipe(wrap(table)),
+        tallies: (id, query) => c.peer.tallies({ params: { id }, query }).pipe(wrap(id)),
+      };
+    }),
+  ).pipe(
+    Layer.provide(
+      HttpApiMiddleware.layerClient(PeerAuth, ({ next, request }) =>
+        next(HttpClientRequest.bearerToken(request, token)),
+      ),
+    ),
+    Layer.provide(FetchHttpClient.layer),
+  );
 
 export const PeerPort = Port.make({
   id: "tide::peer",

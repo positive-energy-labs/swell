@@ -16,6 +16,7 @@ catalog:
   vitest: 5.0.1
 
 overrides:
+  "@effect/platform-node-shared": 4.0.0-rc.118
   vite: "catalog:"
   vitest: "catalog:"
 

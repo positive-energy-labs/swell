@@ -146,6 +146,8 @@ export const TideFacts = [Snapshot, Reading, Observed, Proposal, Verdict] as con
 /** ISO week key, so tallies stay bounded and a fixed issue decays out of the window. */
 export const week = (at: number): string => {
   const d = new Date(at);
+  // Midnight first: without it any instant past 12:00 UTC rounds into the next week.
+  d.setUTCHours(0, 0, 0, 0);
   const day = (d.getUTCDay() + 6) % 7;
   d.setUTCDate(d.getUTCDate() - day + 3);
   const year = d.getUTCFullYear();

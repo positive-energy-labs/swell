@@ -1,4 +1,4 @@
-import { Clock, Effect, type Layer, Option, type Schema } from "effect";
+import { Clock, Effect, Exit, type Layer, Option, Schema } from "effect";
 import type { Db, Find } from "./db.ts";
 import type { AnyFact } from "./fact.ts";
 import type { Actor, Command } from "./command.ts";
@@ -7,7 +7,7 @@ import { type CommandError, Unauthorized } from "./errors.ts";
 import type { AnyPort } from "./port.ts";
 import { lookup, ofKind } from "./registry.ts";
 import type { AnyRule } from "./rule.ts";
-import { makeDb, makeReader, settle, type Store, transact } from "./store.ts";
+import { makeReader, type Store, transact } from "./store.ts";
 import { complete, execute, type Job, plan, sweep } from "./sweep.ts";
 import * as Trace from "./trace.ts";
 
@@ -85,7 +85,34 @@ export const memoryStore = () => {
         }),
     },
     kick: (rule) => Effect.sync(() => void kicks.push(rule)),
-    transaction: (fa) => fa,
+    // A failed or interrupted transaction leaves nothing behind, as SQLite's ROLLBACK does: the spec covers the failure path.
+    transaction: (fa) =>
+      Effect.suspend(() => {
+        const before = {
+          tables: new Map<string, Array<Record<string, unknown>>>([...tables].map(([k, v]) => [k, [...v]])),
+          tallies: new Map<string, Record<string, number>>([...tallies].map(([k, v]) => [k, { ...v }])),
+          snapshots: new Map(snapshots),
+          kicks: kicks.length,
+          seq,
+          created,
+        };
+        return fa.pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isSuccess(exit)) return;
+              tables.clear();
+              for (const [k, v] of before.tables) tables.set(k, v);
+              tallies.clear();
+              for (const [k, v] of before.tallies) tallies.set(k, v);
+              snapshots.clear();
+              for (const [k, v] of before.snapshots) snapshots.set(k, v);
+              kicks.length = before.kicks;
+              seq = before.seq;
+              created = before.created;
+            }),
+          ),
+        );
+      }),
   };
   return { store, tables, tallies, snapshots, kicks };
 };
@@ -122,9 +149,16 @@ export const simulator = <M extends { readonly store: Store } = ReturnType<typeo
   ): Effect.Effect<Ret["Type"], CommandError> =>
     Effect.gen(function* () {
       if (!actor.roles.has(cmd.role)) return yield* new Unauthorized({ need: cmd.role });
+      // The command's declared args are applied, so a caller cannot smuggle a string where a boolean is declared.
+      const decoded = (yield* (
+        Schema.decodeUnknownEffect(Schema.Struct(cmd.args))(args) as Effect.Effect<
+          unknown,
+          Schema.SchemaError
+        >
+      ).pipe(Effect.orDie)) as Schema.Struct<Args>["Type"];
       const now = yield* Clock.currentTimeMillis;
       return yield* transact(mem.store, { by: actor.by, now, trace: undefined }, (db) =>
-        cmd.run(args, { db: db as Db<R, W>, actor, now }),
+        cmd.run(decoded, { db: db as Db<R, W>, actor, now }),
       );
     });
 
@@ -143,9 +177,10 @@ export const simulator = <M extends { readonly store: Store } = ReturnType<typeo
       const settled = yield* execute(rule, job, ports);
       if (settled.outcome === "killed") continue;
       const now = yield* Clock.currentTimeMillis;
-      const db = makeDb(mem.store, { by: `rule:${rule.id}`, now, trace: undefined });
-      yield* complete(rule, job, settled, db).pipe(Trace.continueFrom(job.traceparent));
-      yield* settle(mem.store);
+      // One transaction: the output facts and the receipt land together, so a retry never re-appends them.
+      yield* transact(mem.store, { by: `rule:${rule.id}`, now, trace: undefined }, (db) =>
+        complete(rule, job, settled, db),
+      ).pipe(Trace.continueFrom(job.traceparent));
     }
   });
 

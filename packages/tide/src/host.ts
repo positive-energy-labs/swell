@@ -1,6 +1,10 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer } from "node:http";
+import { NodeHttpServer } from "@effect/platform-node";
 import { type AnyPort, Kernel, Memory, type Store, transact } from "@tc/kernel";
-import { Clock, Effect, Layer } from "effect";
+import { Clock, Effect, Layer, Redacted, Schedule } from "effect";
+import { HttpRouter, HttpServerResponse } from "effect/http";
+import { HttpApiBuilder } from "effect/http-api";
+import { BadRead, NoPeerToken, PeerAuth, TideApi } from "./door.ts";
 import { issuesOf, Proposal, Snapshot, Verdict } from "./facts.ts";
 import { gitPlant } from "./git.ts";
 import { Decide, type ObservePayload, rulesOf, type TideSpec } from "./loop.ts";
@@ -19,8 +23,8 @@ export interface HostOptions {
   readonly work: string;
   readonly tides: ReadonlyArray<TideSpec>;
   readonly gh?: boolean;
-  /** Bearer token peers present to read this host. No token, no peer door. */
-  readonly token?: string;
+  /** Bearer token for the peer door and the page's decide verb. */
+  readonly token: string;
   /** Override the plant layer, for a host under test. */
   readonly plant?: Layer.Layer<Plant>;
 }
@@ -96,7 +100,13 @@ export const makeHost = (opts: HostOptions) => {
       }
       const payload: ObservePayload = { verdicts, ...(head.snapshot === last?.snapshot ? {} : { head }) };
       yield* sim.entry(t.observe, payload);
-    }).pipe(Effect.provide(plantLayer));
+    }).pipe(
+      Effect.provide(plantLayer),
+      // A dead remote skips its plant this tick; the other plants and the sweep still run.
+      Effect.catchTag("PlantError", (e) =>
+        Effect.logWarning(`plant ${t.tide.plant.id}: ${e.op}: ${e.message}`),
+      ),
+    );
 
   const tick = Effect.gen(function* () {
     yield* enable;
@@ -109,6 +119,13 @@ export const makeHost = (opts: HostOptions) => {
       }
     }
   });
+
+  /** Tick forever. Sequential by construction, a failed tick is logged and the next one runs, interrupt stops it. */
+  const run = (everyMs: number) =>
+    tick.pipe(
+      Effect.catchCause((cause) => Effect.logError("tick failed", cause)),
+      Effect.repeat(Schedule.spaced(everyMs)),
+    );
 
   const decide = (
     args: { plant: string; loop: string; subject: string; accept: boolean; text: string },
@@ -141,79 +158,70 @@ export const makeHost = (opts: HostOptions) => {
       return { plant, now, issues, proposals: rows, health: yield* sim.health };
     });
 
-  const serve = (port: number) => {
-    const json = (res: ServerResponse, body: unknown, status = 200) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
-    };
-    const body = (req: IncomingMessage) =>
-      new Promise<string>((ok) => {
-        let s = "";
-        req.on("data", (c: Buffer) => (s += c.toString("utf8")));
-        req.on("end", () => ok(s));
-      });
-    const server = createServer((req, res) => {
-      void (async () => {
-        const url = new URL(req.url ?? "/", "http://x");
-        const q = (k: string) => url.searchParams.get(k) ?? undefined;
-        try {
-          if (url.pathname === "/" && req.method === "GET") {
-            res.writeHead(200, { "content-type": "text/html" });
-            return res.end(page(tides.map((t) => t.tide.plant.id)));
-          }
-          if (url.pathname === "/health") return json(res, await Effect.runPromise(sim.health));
-          if (url.pathname === "/view")
-            return json(res, await Effect.runPromise(view(q("plant") ?? tides[0]?.tide.plant.id ?? "")));
-          if (url.pathname === "/decide" && req.method === "POST") {
-            const b = JSON.parse(await body(req)) as {
-              plant: string;
-              loop: string;
-              subject: string;
-              accept: boolean;
-              text: string;
-              person: string;
-            };
-            return json(res, { verdict: await Effect.runPromise(decide(b, b.person)) });
-          }
-          // The peer door: bounded reads only, under a token.
-          const peer = url.pathname.match(/^\/(facts|tallies)\/([a-z0-9_:-]+)$/);
-          if (peer !== null) {
-            if (opts.token === undefined || req.headers.authorization !== `Bearer ${opts.token}`)
-              return json(res, { error: "no peer token" }, 401);
-            const limit = Math.min(Number(q("limit") ?? 256), 2048);
-            if (peer[1] === "tallies") {
-              return json(
-                res,
-                await Effect.runPromise(store.tally.range(peer[2]!, q("gte") ?? "", q("lt") ?? "~", limit)),
-              );
-            }
-            const index = q("index") ?? "by_key";
-            const eq = q("eq");
-            const order = q("order");
-            return json(
-              res,
-              await Effect.runPromise(
-                store.find(peer[2]!, index, fieldsOf(peer[2]!, index), {
-                  ...(eq === undefined ? {} : { eq: JSON.parse(eq) as Array<string | number | boolean> }),
-                  ...(q("gte") === undefined ? {} : { gte: q("gte")! }),
-                  ...(q("lt") === undefined ? {} : { lt: q("lt")! }),
-                  ...(order === "desc" ? { order: "desc" as const } : {}),
-                  limit,
-                }),
-              ),
-            );
-          }
-          json(res, { error: "not found" }, 404);
-        } catch (e) {
-          json(res, { error: e instanceof Error ? e.message : String(e) }, 500);
-        }
-      })();
-    });
-    server.listen(port, "127.0.0.1");
-    return server;
-  };
+  const PeerLive = HttpApiBuilder.group(TideApi, "peer", (h) =>
+    Effect.succeed(
+      h.handleAll({
+        facts: ({ params, query: { index = "by_key", limit = 256, eq, gte, lt, order } }) =>
+          fieldsOf(params.table, index).pipe(
+            Effect.mapError((e) => new BadRead({ message: e.message })),
+            Effect.flatMap((fields) =>
+              store.find(params.table, index, fields, {
+                limit,
+                ...(eq === undefined ? {} : { eq }),
+                ...(gte === undefined ? {} : { gte }),
+                ...(lt === undefined ? {} : { lt }),
+                ...(order === undefined ? {} : { order }),
+              }),
+            ),
+          ),
+        tallies: ({ params, query }) =>
+          store.tally.range(params.id, query.gte ?? "", query.lt ?? "~", query.limit ?? 256),
+      }),
+    ),
+  );
+  const PageLive = HttpApiBuilder.group(TideApi, "page", (h) =>
+    Effect.succeed(
+      h.handleAll({
+        view: ({ query }) => view(query.plant ?? tides[0]?.tide.plant.id ?? ""),
+        health: () => sim.health,
+      }),
+    ),
+  );
+  const ActLive = HttpApiBuilder.group(TideApi, "act", (h) =>
+    Effect.succeed(
+      h.handle("decide", ({ payload: { person, ...args } }) =>
+        decide(args, person).pipe(Effect.map((verdict) => ({ verdict }))),
+      ),
+    ),
+  );
+  const AuthLive = Layer.succeed(
+    PeerAuth,
+    PeerAuth.of({
+      bearer: (app, { credential }) =>
+        Redacted.value(credential) === opts.token
+          ? app
+          : Effect.fail(new NoPeerToken({ message: "bad token" })),
+    }),
+  );
+  const Page = HttpRouter.add(
+    "GET",
+    "/",
+    Effect.sync(() => HttpServerResponse.html(page(tides.map((t) => t.tide.plant.id)))),
+  );
 
-  return { store, sim, tides, enable, tick, decide, view, serve, close: () => sqlite.close() };
+  /** The server as a scoped layer: build it to listen, close the scope to stop. `HttpServer.HttpServer` carries the address. */
+  const serve = (port: number) =>
+    HttpRouter.serve(Layer.mergeAll(HttpApiBuilder.layer(TideApi), Page), {
+      disableLogger: true,
+      disableListenLog: true,
+    }).pipe(
+      Layer.provide(Layer.mergeAll(PeerLive, PageLive, ActLive)),
+      // provideMerge, not provide: the router resolves PeerAuth too, and plain provide compiles then dies at runtime.
+      Layer.provideMerge(AuthLive),
+      Layer.provideMerge(NodeHttpServer.layer(createServer, { port, host: "127.0.0.1" })),
+    );
+
+  return { store, sim, tides, enable, tick, run, decide, view, serve, close: () => sqlite.close() };
 };
 
 /** A read-only gauge with one verb. Proven by a DOM assertion, never by a description. */
@@ -223,11 +231,13 @@ const page = (plants: ReadonlyArray<string>) => `<!doctype html>
 <h1>tide</h1>
 <label>plant <select id="plant">${plants.map((p) => `<option>${p}</option>`).join("")}</select></label>
 <label>person <input id="person" value="kai" size="8"></label>
+<label>token <input id="token" type="password" size="12"></label>
 <h2>issues</h2><table id="issues"><thead><tr><th>fingerprint</th><th>sources</th><th>hits</th><th>runs</th><th>rate</th></tr></thead><tbody></tbody></table>
 <h2>proposals</h2><table id="proposals"><thead><tr><th>loop</th><th>subject</th><th>text</th><th>cites</th><th>verdict</th></tr></thead><tbody></tbody></table>
 <script>
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+$("#token").value=localStorage.getItem("tide.token")||"";$("#token").onchange=()=>localStorage.setItem("tide.token",$("#token").value);
 async function load(){
   const v=await (await fetch("/view?plant="+encodeURIComponent($("#plant").value))).json();
   $("#issues tbody").innerHTML=v.issues.map(i=>\`<tr><td><code>\${esc(i.fingerprint)}</code></td><td>\${esc(i.sources.join(", "))}</td><td>\${i.hits}</td><td>\${i.runs}</td><td>\${i.rate.toFixed(2)}</td></tr>\`).join("");
@@ -235,6 +245,7 @@ async function load(){
 }
 document.addEventListener("click",async e=>{const b=e.target.closest("button[data-a]");if(!b)return;
   const accept=b.dataset.a==="1";const text=accept?"":prompt("why not?")||"";if(!accept&&!text)return;
-  await fetch("/decide",{method:"POST",body:JSON.stringify({plant:$("#plant").value,loop:b.dataset.l,subject:b.dataset.s,accept,text,person:$("#person").value})});load();});
+  const r=await fetch("/decide",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+$("#token").value},body:JSON.stringify({plant:$("#plant").value,loop:b.dataset.l,subject:b.dataset.s,accept,text,person:$("#person").value})});
+  if(!r.ok)alert(r.status+" "+await r.text());load();});
 $("#plant").onchange=load;load();setInterval(load,5000);
 </script>`;

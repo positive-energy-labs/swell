@@ -1,25 +1,16 @@
-import { type AnyFact, type AnyPort, Command, Entry, Port, type Reader, Rule, violation } from "@tc/kernel";
-import { Effect, Layer, Schema } from "effect";
+import { type AnyFact, Command, Entry, type Reader, Rule, violation } from "@tc/kernel";
+import { Effect, Schema } from "effect";
 import { Finding, type Issue, issuesOf, meta, Proposal, Reading, Snapshot, Verdict } from "./facts.ts";
 import {
   type ActuatorSpec,
   type Brief,
   type Head,
   Plant,
+  PlantError,
   PlantPort,
   type PlantSpec,
   type SensorSpec,
 } from "./plant.ts";
-
-/** Effect's own Clock stands behind this port, so a cron trigger has a port to name. */
-export const ClockPort = Port.make({
-  id: "tide::clock",
-  service: undefined,
-  live: Layer.empty,
-  fake: Layer.empty,
-  impl: "real",
-  meta: meta("Clock", "Time, for cron triggers.", "Effect's Clock; TestClock in tests"),
-});
 
 export interface LoopSpec {
   readonly id: string;
@@ -33,7 +24,6 @@ export interface LoopSpec {
   readonly gate: "pr" | "auto";
   /** Who decides, and who the loop acts for. */
   readonly person: string;
-  readonly cron?: string;
 }
 
 export interface TideSpec {
@@ -54,6 +44,17 @@ export const defineTide = (spec: TideSpec): TideSpec => {
     ...spec.loops.map((l) => l.id),
   ];
   for (const id of ids) if (!KEBAB.test(id)) throw new Error(`tide: id '${id}' is not kebab-case`);
+  for (const list of [spec.sensors, spec.actuators, spec.loops] as ReadonlyArray<
+    ReadonlyArray<{ id: string }>
+  >) {
+    const seen = new Set<string>();
+    for (const { id } of list) {
+      if (seen.has(id)) throw new Error(`tide: id '${id}' is declared twice`);
+      seen.add(id);
+    }
+  }
+  for (const x of [...spec.sensors, ...spec.actuators])
+    if (x.run.length === 0) throw new Error(`tide: '${x.id}' has an empty run`);
   const sensors = new Set(spec.sensors.map((s) => s.id));
   const actuators = new Set(spec.actuators.map((a) => a.id));
   for (const loop of spec.loops) {
@@ -108,7 +109,7 @@ const latestSnapshot = (db: Reader<AnyFact>, plant: string, enabledAt: number) =
     .pipe(Effect.map((r) => r[0]));
 
 /** Compile one declaration into kernel primitives: a sense rule, one rule per loop, an apply rule, and the host's observe door. */
-export const rulesOf = (tide: TideSpec, clock: AnyPort = ClockPort) => {
+export const rulesOf = (tide: TideSpec) => {
   const { plant } = tide;
   const sensors = new Map(tide.sensors.map((s) => [s.id, s]));
   const actuators = new Map(tide.actuators.map((a) => [a.id, a]));
@@ -198,7 +199,7 @@ export const rulesOf = (tide: TideSpec, clock: AnyPort = ClockPort) => {
       reads: [Reading, Proposal, Verdict, Snapshot],
       uses: [PlantPort],
       writes: [Proposal, Verdict],
-      triggers: [Rule.onFact(Reading), Rule.onCron(loop.cron ?? "0 * * * *", clock)],
+      triggers: [Rule.onFact(Reading)],
       subject: LoopSubject,
       want: (db, { now, enabledAt }) =>
         Effect.gen(function* () {
@@ -270,7 +271,10 @@ export const rulesOf = (tide: TideSpec, clock: AnyPort = ClockPort) => {
             feedback: s.feedback,
           };
           const changes = yield* p.act(plant, actuators.get(loop.act)!, brief);
-          if (changes === null) return yield* Effect.fail(new Error("actuator changed nothing"));
+          if (changes === null)
+            return yield* Effect.fail(
+              new PlantError({ op: `act ${loop.act}`, message: "actuator changed nothing" }),
+            );
           const text = `${loop.id}: ${s.fingerprint}, seen by ${s.sources.join(", ")} at ${s.snapshot.slice(0, 7)}`;
           const proposed = yield* p.propose(plant, changes, text, loop.gate);
           const base = { plant: plant.id, loop: loop.id, subject: s.subject };

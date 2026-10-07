@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Find, Store } from "@tc/kernel";
-import { Effect, Exit, Option } from "effect";
+import { type AnyFact, type Find, ofKind, type Store } from "@tc/kernel";
+import { Context, Effect, Exit, Option, Semaphore } from "effect";
 
 type Row = { _id: string; _creationTime: number; doc: string };
 
@@ -19,26 +19,19 @@ export const sqliteStore = (path: string) => {
     CREATE TABLE IF NOT EXISTS tally(id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(id, key));
     CREATE TABLE IF NOT EXISTS snap(id TEXT NOT NULL, key TEXT NOT NULL, shelf TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(id, key));
   `);
-  const tables = new Set<string>();
-  const indexes = new Set<string>();
-  const table = (t: string) => {
-    if (!tables.has(t)) {
-      db.exec(
-        `CREATE TABLE IF NOT EXISTS "${t}"(_id TEXT PRIMARY KEY, _creationTime REAL NOT NULL, doc TEXT NOT NULL)`,
-      );
-      tables.add(t);
-    }
-    return `"${t}"`;
-  };
   const col = (f: string) => (f === "_creationTime" ? "_creationTime" : `json_extract(doc, '$.${f}')`);
-  const index = (t: string, name: string, fields: ReadonlyArray<string>) => {
-    const key = `${t}|${name}`;
-    if (indexes.has(key)) return;
+  const table = (t: string) => `"${t}"`;
+  // Every registered fact's table and index exists before the first transaction, so a rolled-back CREATE can never poison a cache.
+  for (const f of ofKind("fact") as ReadonlyArray<AnyFact>) {
     db.exec(
-      `CREATE INDEX IF NOT EXISTS "${t}__${name}" ON ${table(t)}(${[...fields.map(col), "_creationTime"].join(", ")})`,
+      `CREATE TABLE IF NOT EXISTS ${table(f.table)}(_id TEXT PRIMARY KEY, _creationTime REAL NOT NULL, doc TEXT NOT NULL)`,
     );
-    indexes.add(key);
-  };
+    for (const [name, fields] of Object.entries(f.indexes as Record<string, ReadonlyArray<string>>)) {
+      db.exec(
+        `CREATE INDEX IF NOT EXISTS "${f.table}__${name}" ON ${table(f.table)}(${[...fields.map(col), "_creationTime"].join(", ")})`,
+      );
+    }
+  }
   const parse = (r: Row) => ({
     ...(JSON.parse(r.doc) as object),
     _id: r._id,
@@ -53,10 +46,22 @@ export const sqliteStore = (path: string) => {
     if (name === "tally" || name === "snap") continue;
     const { m } = db.prepare(`SELECT MAX(_creationTime) m FROM "${name}"`).get() as { m: number | null };
     created = Math.max(created, m ?? 0);
-    tables.add(name);
   }
 
-  let depth = 0;
+  // One writer at a time, and only the fiber that opened the transaction is inside it: another fiber waits, it never joins.
+  const inTx = Context.Reference<boolean>(`tide/inTx/${randomUUID()}`, { defaultValue: () => false });
+  const lock = Semaphore.makeUnsafe(1);
+  const finish = (exit: Exit.Exit<unknown, unknown>) =>
+    Effect.sync(() => {
+      if (!Exit.isSuccess(exit)) return db.exec("ROLLBACK");
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    });
+
   const store: Store = {
     get: (t, id) =>
       Effect.sync(() => {
@@ -65,9 +70,8 @@ export const sqliteStore = (path: string) => {
           | undefined;
         return r === undefined ? Option.none() : Option.some(parse(r));
       }),
-    find: (t, name, fields, f: Find) =>
+    find: (t, _name, fields, f: Find) =>
       Effect.sync(() => {
-        index(t, name, fields);
         const eq = f.eq ?? [];
         const where: Array<string> = [];
         const params: Array<string | number> = [];
@@ -164,13 +168,14 @@ export const sqliteStore = (path: string) => {
     kick: () => Effect.void,
     transaction: (fa) =>
       Effect.gen(function* () {
-        if (depth > 0) return yield* fa;
-        depth++;
-        db.exec("BEGIN IMMEDIATE");
-        const exit = yield* Effect.exit(fa);
-        depth--;
-        db.exec(Exit.isSuccess(exit) ? "COMMIT" : "ROLLBACK");
-        return yield* exit;
+        if (yield* inTx) return yield* fa;
+        return yield* lock.withPermits(1)(
+          Effect.acquireUseRelease(
+            Effect.sync(() => db.exec("BEGIN IMMEDIATE")),
+            () => Effect.provideService(fa, inTx, true),
+            (_, exit) => finish(exit),
+          ),
+        );
       }),
   };
   return { store, db, close: () => db.close() };

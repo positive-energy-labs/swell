@@ -13,7 +13,9 @@ import {
   Proposal,
   Reading,
   rulesOf,
+  Snapshot,
   Verdict,
+  week,
 } from "../src/index.ts";
 import { sqliteStore } from "../src/sqlite.ts";
 
@@ -53,6 +55,49 @@ const stores: Array<[string, () => Store]> = [
   ["sqlite", () => sqliteStore(":memory:").store],
 ];
 
+describe("defineTide", () => {
+  it("refuses a duplicate id, an empty run, and a loop over an unknown sensor", () => {
+    const base = {
+      plant: { id: "p", kind: "git" as const, root: ".", ref: "main" },
+      actuators: [{ id: "a", run: ["x"] }],
+      loops: [],
+    };
+    assert.throws(
+      () =>
+        defineTide({
+          ...base,
+          sensors: [
+            { id: "s", kind: "measured", run: ["x"] },
+            { id: "s", kind: "measured", run: ["y"] },
+          ],
+        }),
+      /twice/,
+    );
+    assert.throws(
+      () => defineTide({ ...base, sensors: [{ id: "s", kind: "measured", run: [] }] }),
+      /empty run/,
+    );
+    assert.throws(
+      () =>
+        defineTide({
+          ...base,
+          sensors: [],
+          loops: [{ id: "l", sense: ["nope"], act: "a", gate: "auto", person: "k" }],
+        }),
+      /unknown sensor/,
+    );
+  });
+});
+
+describe("week", () => {
+  it("is the ISO week whatever the time of day", () => {
+    assert.strictEqual(week(Date.UTC(2026, 9, 7, 9)), "2026-W41");
+    assert.strictEqual(week(Date.UTC(2026, 9, 7, 15)), "2026-W41");
+    assert.strictEqual(week(Date.UTC(2026, 0, 1)), "2026-W01");
+    assert.strictEqual(week(Date.UTC(2027, 0, 3, 23, 59)), "2026-W53");
+  });
+});
+
 describe.each(stores)("tide over %s", (_name, mkStore) => {
   const boot = () =>
     Effect.gen(function* () {
@@ -85,6 +130,24 @@ describe.each(stores)("tide over %s", (_name, mkStore) => {
         sim.reader.find(Proposal, "by_loop", { eq: ["repo", "purge"], gte: 0, limit: 100 });
       return { world, store, sim, snapshot, sweep, proposals };
     });
+
+  it.effect("a failed transaction leaves nothing behind", () =>
+    Effect.gen(function* () {
+      const t = yield* boot();
+      const now = yield* Clock.currentTimeMillis;
+      const exit = yield* Effect.exit(
+        transact(t.store, { by: "test", now, trace: undefined }, (db) =>
+          Effect.gen(function* () {
+            yield* db.append(Snapshot, { plant: "repo", snapshot: "lost", commits: 0, churn: 0 });
+            return yield* Effect.fail(new Error("after the append"));
+          }),
+        ),
+      );
+      assert.isTrue(exit._tag === "Failure");
+      const rows = yield* t.sim.reader.find(Snapshot, "by_key", { eq: ["repo", "lost"], limit: 1 });
+      assert.strictEqual(rows.length, 0);
+    }),
+  );
 
   it.effect("a reading per sensor per snapshot; a failed sensor is an error row, never a zero", () =>
     Effect.gen(function* () {
@@ -147,6 +210,30 @@ describe.each(stores)("tide over %s", (_name, mkStore) => {
       );
       // Still covered after the apply: an accepted wave never re-fires on the same evidence.
       assert.strictEqual((yield* t.sweep(purge))[0]!.wanted, 0);
+    }),
+  );
+
+  it.effect("a verdict's args are decoded: a string where a boolean is declared is a defect, not a yes", () =>
+    Effect.gen(function* () {
+      const t = yield* boot();
+      t.world.sensed.set("lint@s1", sensed(["dup-code"]));
+      t.world.sensed.set("review@s1", sensed(["dup-code"]));
+      t.world.changes = { ref: "tide/purge/dup", head: "h1", summary: "" };
+      yield* t.snapshot("s1");
+      yield* t.sweep(sense, purge);
+      const [p] = yield* t.proposals();
+      const exit = yield* Effect.exit(
+        t.sim.command(
+          Decide,
+          { plant: "repo", loop: "purge", subject: p!.subject, accept: "false" as never, text: "" },
+          kai,
+        ),
+      );
+      assert.isTrue(exit._tag === "Failure");
+      assert.strictEqual(
+        (yield* t.sim.reader.find(Verdict, "by_plant", { eq: ["repo"], gte: 0, limit: 10 })).length,
+        0,
+      );
     }),
   );
 

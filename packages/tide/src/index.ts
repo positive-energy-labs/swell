@@ -4,8 +4,8 @@
  * per fingerprint when its evidence clears the bar, a verdict applies it. Node-only parts live in `./host`.
  */
 export * from "./facts.ts";
+export { ActGroup, BadRead, NoPeerToken, PageGroup, PeerAuth, PeerGroup, TideApi } from "./door.ts";
 export {
-  ClockPort,
   Decide,
   defaultWhen,
   defineTide,
@@ -15,20 +15,34 @@ export {
   rulesOf,
   type TideSpec,
 } from "./loop.ts";
-export { observedOf, Peer, PeerPort, type PeerService, peerHttp, peerOf, urnOf } from "./peer.ts";
+export {
+  fieldsOf,
+  observedOf,
+  Peer,
+  PeerError,
+  PeerPort,
+  type PeerService,
+  peerHttp,
+  peerOf,
+  UnknownIndex,
+  urnOf,
+} from "./peer.ts";
 export {
   type ActuatorSpec,
   type Brief,
   type Changes,
   type Decision,
+  failedSensed,
   fakePlant,
   fakeWorld,
   type FakeWorld,
   type Head,
   Plant,
+  PlantError,
   PlantPort,
   type PlantService,
   type PlantSpec,
-  type Sensed,
+  Sensed,
+  SensedJson,
   type SensorSpec,
 } from "./plant.ts";
