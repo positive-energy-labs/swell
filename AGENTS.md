@@ -103,7 +103,6 @@ Audited module by module against the pinned rc.118 (`.artifacts/swarm/*.md`, 202
 
 ## Owed
 
-- A GitHub remote (`gh` was not logged in on the build machine).
 - A manual loop on a plant with no remote can propose but its accepted move cannot apply (push-only needs a remote); only auto is refused at load.
 - The kernel's `onCron` trigger stays for The Current's Convex crons; swell loops have none, because the controller sweeps every rule each period.
 - A killed actuator's own children are not killed; `execFile`'s signal reaches one process.
