@@ -2,6 +2,7 @@
   "name": "swell",
   "version": "0.0.0",
   "private": true,
+  "description": "A control loop over an append-only fact kernel: sensors and observers measure a plant, signals fold into signatures, and when a signature crosses its threshold an actuator proposes one move for the operator to approve. Vocabulary: plant, sensor, observer, measurement, signal, signature, threshold, actuator, move, limit, mode, operator.",
   "bin": {
     "swell": "./src/bin.ts"
   },
