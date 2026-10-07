@@ -7,8 +7,8 @@ import { register } from "./registry.ts";
 import { isStub, NotImplemented, intentOf, type Stub } from "./stub.ts";
 
 /** An agent that acts for a person under a `people::agent-grant`. */
-export type Agent = "pea" | "pi";
-
+/** An agent that acts for a person; a domain narrows it to its own names. */
+export type Agent = string;
 /**
  * Who is acting. Roles are TC facts (memberships, access grants), not Clerk facts.
  * An agent acts as `agent:<name>` with `via` naming the person it acts for.

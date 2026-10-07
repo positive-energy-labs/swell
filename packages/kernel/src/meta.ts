@@ -1,6 +1,6 @@
-/** Metadata every primitive carries. The architecture graph draws it, so it is written for Miguel and Cameron, not the compiler. */
-export type Layer = "core" | "pi" | "integrations" | "people";
-export type Audience = "partners" | "dev";
+/** Metadata every primitive carries. The architecture graph draws it for people, not the compiler. A domain narrows layer and audience. */
+export type Layer = string;
+export type Audience = string;
 
 export type Ruling =
   | { readonly ruled: true; readonly src: string }

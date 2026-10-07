@@ -46,6 +46,8 @@ export interface Store {
   };
   /** Wake a rule soon because a fact it triggers on was appended. No-op where there is no scheduler. */
   readonly kick: (rule: string) => Effect.Effect<void>;
+  /** Run one write unit atomically. Identity where the caller already is one (a Convex mutation); BEGIN/COMMIT for SQLite. */
+  readonly transaction: <A, E, R>(fa: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
 }
 
 export interface WriteCtx {
@@ -127,7 +129,7 @@ export const transact = <A, E, R>(
   store: Store,
   ctx: WriteCtx,
   f: (db: Db<AnyFact, AnyFact>) => Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R> => Effect.tap(f(makeDb(store, ctx)), () => settle(store));
+): Effect.Effect<A, E, R> => store.transaction(Effect.tap(f(makeDb(store, ctx)), () => settle(store)));
 
 export const makeDb = (store: Store, ctx: WriteCtx): Db<AnyFact, AnyFact> => {
   const reader = makeReader(store);

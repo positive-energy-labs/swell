@@ -2,6 +2,7 @@ import { Clock, Effect, type Layer, Option, type Schema } from "effect";
 import type { Db, Find } from "./db.ts";
 import type { AnyFact } from "./fact.ts";
 import type { Actor, Command } from "./command.ts";
+import type { Entry } from "./entry.ts";
 import { type CommandError, Unauthorized } from "./errors.ts";
 import type { AnyPort } from "./port.ts";
 import { lookup, ofKind } from "./registry.ts";
@@ -84,14 +85,30 @@ export const memoryStore = () => {
         }),
     },
     kick: (rule) => Effect.sync(() => void kicks.push(rule)),
+    transaction: (fa) => fa,
   };
   return { store, tables, tallies, snapshots, kicks };
 };
 
-/** The whole system in one process over a memory store, every port on its fake layer. `now` comes from Effect's Clock, so TestClock drives time. */
-export const simulator = (ports: (port: AnyPort) => Layer.Layer<any> = (p) => p.fake as Layer.Layer<any>) => {
-  const mem = memoryStore();
+/**
+ * The whole system in one process: commands, entries, sweep, a job queue, drain, health. Over a memory
+ * store with every port faked it is the simulator; over SQLite with live ports it is a host. `now` comes
+ * from Effect's Clock, so TestClock drives time in tests.
+ */
+export const simulator = <M extends { readonly store: Store } = ReturnType<typeof memoryStore>>(
+  ports: (port: AnyPort) => Layer.Layer<any> = (p) => p.fake as Layer.Layer<any>,
+  mem: M = memoryStore() as unknown as M,
+  by = "host",
+) => {
   const queue: Array<Job> = [];
+
+  const entry = (e: Entry, payload: unknown) =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis;
+      return yield* transact(mem.store, { by, now, trace: undefined }, (db) =>
+        e.handle(payload, { db, now }),
+      );
+    });
 
   const command = <
     Args extends Schema.Struct.Fields,
@@ -138,5 +155,5 @@ export const simulator = (ports: (port: AnyPort) => Layer.Layer<any> = (p) => p.
     return yield* Effect.forEach(ofKind("rule"), (r) => plan(r, reader, now));
   });
 
-  return { ...mem, reader: makeReader(mem.store), queue, command, sweep: sweepRule, drain, health };
+  return { ...mem, reader: makeReader(mem.store), queue, command, entry, sweep: sweepRule, drain, health };
 };

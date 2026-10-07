@@ -6,8 +6,8 @@ import type { Declared, Meta } from "./meta.ts";
 import { register } from "./registry.ts";
 import { isStub, NotImplemented, intentOf, type Stub } from "./stub.ts";
 
-/** Where an inbound thing came from. Entries and `pi::observed` rows share this one list. */
-export const Source = Schema.Literals(["gmail", "chat", "drive", "fireflies", "revit", "import"]);
+/** Where an inbound thing came from: the origin system by name. A domain narrows it to its own literals. */
+export const Source = Schema.String;
 export type Source = typeof Source.Type;
 
 export interface EntryCtx {
