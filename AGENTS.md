@@ -44,11 +44,17 @@ A signal is never a row: it rides inside a reading and the issues rollup folds i
 
 ```sh
 tide once  --config <plant>/tide.config.ts [--config <other>/tide.config.ts]   # observe, sweep, drain, exit
-tide serve --config ... --port 4747 --every 60 [--gh] [--token <peer token>]  # tick and serve the page
+tide serve --config ... --port 4747 --every 60 [--gh]                          # tick and serve the page
 tide view  --config ... --plant <id>                                            # the page's JSON
 ```
 
-Work dir defaults to `~/.tide/<host>`; the store is `tide.sqlite` there. A sensor is argv run at a clean checkout, printing `{ findings, analyzed, excluded, failed }`. An actuator is argv run in a worktree with `TIDE_BRIEF` pointing at the evidence JSON; what it leaves changed becomes the wave.
+Every verb takes `--token` or `TIDE_TOKEN`: the bearer for the peer door and the page's decide verb. Work dir defaults to `~/.tide/<host>`; the store is `tide.sqlite` there. A sensor is argv run at a clean checkout, printing `{ findings, analyzed, excluded, failed }`; it is decoded, so garbage is a failed reading, and it is killed at `timeoutMs` (default ten minutes). An actuator is argv run in a worktree with `TIDE_BRIEF` pointing at the evidence JSON, killed at `timeoutMs` (default one hour); what it leaves changed becomes the wave. Both run asynchronously, so the page and the door stay live while an agent works.
+
+The door is one `HttpApi` contract (`door.ts`) the server and the peer client both derive from: `/facts/:table`, `/tallies/:id`, `/view`, `/health`, `/decide`. A bad limit or an unknown index is a 400, a bad token a 401, a refused verdict a 422.
+
+## Effect
+
+Audited module by module against the pinned rc.118 (`.artifacts/swarm/*.md`, 2026-10-07). Adopted: `HttpApi` for the door, `Effect.callback` plus `timeoutOrElse` for child processes, `Semaphore` plus `acquireUseRelease` for the SQLite transaction, `Schema` decoding at every edge that was a cast, `Data.TaggedError` for plant and peer errors, `effect/cli` for the verbs, `Effect.repeat` with `Schedule.spaced` for the tick. Rejected: `eventlog`, `workflow`, `cluster`, `sql` and `persistence` as a second state owner beside the facts; `Path` as POSIX-only on Windows; `FileSystem` and `Config` as surface with no bug removed; `Hash.string` as unstable across runs for a persisted key.
 
 ```ts
 // <plant>/tide.config.ts. A type-only import is erased by Node, so the plant installs nothing; the host validates on load.
@@ -82,7 +88,9 @@ export default {
 ## Owed
 
 - A GitHub remote (`gh` was not logged in on the build machine).
-- The kernel's `onCron` trigger is declared and not evaluated: the host sweeps every rule each tick.
+- The kernel's `onCron` trigger stays for The Current's Convex crons; tide loops have none, because the host sweeps every rule each tick.
+- A killed actuator's own children are not killed; `execFile`'s signal reaches one process.
+- The page's token lives in `localStorage`; the server is loopback-only, so the tailnet exposure the factory wanted needs a reverse proxy or a listen flag.
 - The laptop's store is the one unreplicated thing: PRs and verdicts live on GitHub, model readings do not. A nightly copy.
 - The Current: dissolve `pi::observed`, `pi::proposal`, `pi::verdict` into tide's rows; its `Proposal.apply` is a command call. `pi::link` and `pi::mark` stay as domain facts.
 - Pe.Tools: adopt after mise lands; delete `ts/packages/factory`; sensors from the factory ledger (fallow, tokei, gitleaks, guards) become `tide.config.ts` rows.
