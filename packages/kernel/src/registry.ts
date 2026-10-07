@@ -1,3 +1,4 @@
+import { Data, Effect, type Scope } from "effect";
 import type { Command } from "./command.ts";
 import type { Entry } from "./entry.ts";
 import type { Fact } from "./fact.ts";
@@ -15,29 +16,40 @@ export type Primitive =
   | Projection<any, any, any, any>;
 
 /** Thrown at module load: a clash is a boot failure, never a runtime surprise. */
-export class DuplicateId extends Error {
-  readonly id: string;
-  constructor(id: string) {
-    super(`kernel: primitive id '${id}' is registered twice`);
-    this.id = id;
+export class DuplicateId extends Data.TaggedError("DuplicateId")<{ readonly id: string }> {
+  override get message() {
+    return `kernel: primitive id '${this.id}' is registered twice`;
   }
 }
-export class InvalidId extends Error {
-  readonly id: string;
-  constructor(id: string) {
-    super(`kernel: primitive id '${id}' is not 'namespace::kebab-name'`);
-    this.id = id;
+export class InvalidId extends Data.TaggedError("InvalidId")<{ readonly id: string }> {
+  override get message() {
+    return `kernel: primitive id '${this.id}' is not 'namespace::kebab-name'`;
   }
 }
 
 const store = new Map<string, Primitive>();
 
 export const register = <P extends { readonly kind: Kind; readonly id: string }>(p: P): P => {
-  if (!ID.test(p.id)) throw new InvalidId(p.id);
-  if (store.has(p.id)) throw new DuplicateId(p.id);
+  if (!ID.test(p.id)) throw new InvalidId({ id: p.id });
+  if (store.has(p.id)) throw new DuplicateId({ id: p.id });
   store.set(p.id, p as unknown as Primitive);
   return p;
 };
+
+/**
+ * Primitives declared at module load live for the process. Ones compiled at runtime from a config (a
+ * controller's rules) are forgotten when the scope that compiled them closes, so a reload or a second
+ * controller in one process can declare the same ids again.
+ */
+export const scoped = <A>(
+  compile: () => A,
+  ids: (a: A) => ReadonlyArray<string>,
+): Effect.Effect<A, never, Scope.Scope> =>
+  Effect.acquireRelease(Effect.sync(compile), (a) =>
+    Effect.sync(() => {
+      for (const id of ids(a)) store.delete(id);
+    }),
+  );
 
 export const registry = (): ReadonlyArray<Primitive> => [...store.values()];
 

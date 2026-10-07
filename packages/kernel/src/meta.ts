@@ -1,5 +1,6 @@
 /** Metadata every primitive carries. The architecture graph draws it for people, not the compiler. A domain narrows layer and audience. */
-export type Layer = string;
+/** The graph layer a primitive is drawn in. Not an Effect Layer. */
+export type GraphLayer = string;
 export type Audience = string;
 
 export type Ruling =
@@ -11,7 +12,7 @@ export type Meta = Ruling & {
   readonly plain: string;
   readonly owner: string;
   readonly audience: Audience;
-  readonly layer: Layer;
+  readonly layer: GraphLayer;
 };
 
 export type Impl = "real" | "stub";

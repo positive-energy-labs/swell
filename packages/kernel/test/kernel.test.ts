@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import {
   Command,
@@ -11,6 +11,9 @@ import {
   Port,
   Rule,
   fnName,
+  lookup,
+  scoped,
+  transact,
   violation,
 } from "../src/index.ts";
 
@@ -92,7 +95,7 @@ const FolderRule = Rule.make({
   triggers: [Rule.onFact(Signed)],
   subject: Schema.Struct({ urn: Schema.String }),
   maxAttempts: 3,
-  leaseMs: 60_000,
+  lease: "1 minute",
   want: (db, { enabledAt }) =>
     db
       .find(Signed, "by_at", { gte: enabledAt, limit: 100 })
@@ -241,4 +244,195 @@ describe("level-triggered rules", () => {
       assert.strictEqual(err._tag, "InvariantViolation");
     }),
   );
+});
+
+const Unique = Fact.make({
+  id: "test::unique",
+  class: "inferred",
+  fields: { key: Schema.String },
+  key: ["key"],
+  unique: true,
+  meta,
+});
+
+describe("every failure settles", () => {
+  const enabled = (sim: ReturnType<typeof Memory.simulator>, rule: string) =>
+    Effect.gen(function* () {
+      yield* sim.command(Enable, { rule }, partner);
+      yield* TestClock.adjust(1000);
+      yield* sim.command(Sign, { name: `for ${rule}` }, partner);
+    });
+
+  it.effect("an undeclared write is a failed receipt, and it counts toward maxAttempts", () =>
+    Effect.gen(function* () {
+      const Sneaky = Rule.make({
+        id: "test::sneaky",
+        reads: [Signed],
+        uses: [],
+        triggers: [Rule.onFact(Signed)],
+        subject: Schema.Struct({ urn: Schema.String }),
+        maxAttempts: 2,
+        want: (db, { enabledAt }) =>
+          db
+            .find(Signed, "by_at", { gte: enabledAt, limit: 1 })
+            .pipe(Effect.map((rows) => rows.map((r) => ({ urn: `s:${r._id}` })))),
+        // A cast past the declared writes: the compiler is lied to, so the kernel must still refuse it.
+        effect: () =>
+          Effect.succeed({
+            result: "x",
+            append: [{ fact: Linked, draft: { signed: "a", folder: "b" } }] as never,
+          }),
+        meta,
+      });
+      const sim = Memory.simulator();
+      yield* enabled(sim, Sneaky.id);
+      for (let i = 0; i < 3; i++) {
+        yield* sim.sweep(Sneaky);
+        yield* sim.drain;
+      }
+      const receipts = (sim.tables.get(Kernel.Receipt.table) ?? []).filter((r) => r.rule === Sneaky.id);
+      assert.deepStrictEqual(
+        receipts.map((r) => r.outcome),
+        ["failed", "failed"],
+      );
+      assert.include(String(receipts[0]!.error), "UndeclaredWrite");
+      const plan = yield* sim.sweep(Sneaky);
+      assert.deepStrictEqual([plan.pending.length, plan.dead.length], [0, 1]);
+      assert.strictEqual(sim.tables.get(Linked.table)?.some((r) => r.signed === "a") ?? false, false);
+    }),
+  );
+
+  it.effect("a write the store refuses settles the attempt as failed, never a stuck subject", () =>
+    Effect.gen(function* () {
+      const Clash = Rule.make({
+        id: "test::clash",
+        reads: [Signed],
+        uses: [],
+        writes: [Unique],
+        triggers: [Rule.onFact(Signed)],
+        subject: Schema.Struct({ urn: Schema.String }),
+        want: (db, { enabledAt }) =>
+          db
+            .find(Signed, "by_at", { gte: enabledAt, limit: 1 })
+            .pipe(Effect.map((rows) => rows.map((r) => ({ urn: `c:${r._id}` })))),
+        effect: () => Effect.succeed({ result: "x", append: [{ fact: Unique, draft: { key: "taken" } }] }),
+        meta,
+      });
+      const sim = Memory.simulator();
+      yield* transact(sim.store, { by: "test", now: 0, trace: undefined }, (db) =>
+        db.append(Unique, { key: "taken" }),
+      );
+      yield* enabled(sim, Clash.id);
+      yield* sim.sweep(Clash);
+      yield* sim.drain;
+      const [r] = (sim.tables.get(Kernel.Receipt.table) ?? []).filter((x) => x.rule === Clash.id);
+      assert.strictEqual(r!.outcome, "failed");
+      assert.include(String(r!.error), "unique:test::unique");
+    }),
+  );
+
+  it.effect("a rule writes as itself, for whoever enabled it", () =>
+    Effect.gen(function* () {
+      Object.assign(world, { folders: new Map(), failNext: 0, killNext: 0, spans: [] });
+      const sim = Memory.simulator();
+      yield* enabled(sim, FolderRule.id);
+      yield* sim.sweep(FolderRule);
+      yield* sim.drain;
+      const receipt = sim.tables.get(Kernel.Receipt.table)!.find((r) => r.rule === FolderRule.id)!;
+      assert.deepStrictEqual([receipt.by, receipt.via], [`rule:${FolderRule.id}`, "person:p1"]);
+    }),
+  );
+
+  it.effect("an unbounded read is a defect inside the effect, never a synchronous throw", () =>
+    Effect.gen(function* () {
+      const sim = Memory.simulator();
+      const read = sim.reader.find(Signed, "by_at", { limit: 0 });
+      const exit = yield* Effect.exit(read);
+      assert.isTrue(Exit.isFailure(exit) && Cause.hasDies(exit.cause));
+    }),
+  );
+});
+
+describe("the memory store is one connection", () => {
+  it.effect("a read waits for the open transaction, so it never sees a write that rolls back", () =>
+    Effect.gen(function* () {
+      const { store } = Memory.memoryStore();
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const tx = yield* Effect.forkChild(
+        transact(store, { by: "test", now: 1, trace: undefined }, (db) =>
+          Effect.gen(function* () {
+            yield* db.append(Signed, { name: "maybe" });
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+            return yield* Effect.fail("rolled back");
+          }),
+        ),
+      );
+      yield* Deferred.await(started);
+      const reader = yield* Effect.forkChild(
+        Memory.simulator(undefined, { store }).reader.find(Signed, "by_at", { limit: 10 }),
+      );
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(release, undefined);
+      assert.isTrue(Exit.isFailure(yield* Fiber.await(tx)));
+      assert.deepStrictEqual(yield* Fiber.join(reader), []);
+    }),
+  );
+
+  it.effect("a nested transaction is a savepoint: its failure rolls back its own writes only", () =>
+    Effect.gen(function* () {
+      const { store } = Memory.memoryStore();
+      yield* transact(store, { by: "test", now: 1, trace: undefined }, (db) =>
+        Effect.gen(function* () {
+          yield* db.append(Signed, { name: "outer" });
+          yield* store
+            .transaction(
+              Effect.gen(function* () {
+                yield* db.append(Signed, { name: "inner" });
+                return yield* Effect.fail("inner fails");
+              }),
+            )
+            .pipe(Effect.ignore);
+        }),
+      );
+      const rows = yield* Memory.simulator(undefined, { store }).reader.find(Signed, "by_at", { limit: 10 });
+      assert.deepStrictEqual(
+        rows.map((r) => r.name),
+        ["outer"],
+      );
+    }),
+  );
+});
+
+describe("runtime declarations", () => {
+  it.effect("a rule compiled in a scope is forgotten when it closes, so the id can be declared again", () =>
+    Effect.gen(function* () {
+      const declare = () =>
+        Rule.make({
+          id: "test::reloaded",
+          reads: [],
+          uses: [],
+          triggers: [],
+          subject: Schema.Struct({ urn: Schema.String }),
+          want: () => Effect.succeed([]),
+          effect: () => Effect.succeed({ result: "" }),
+          meta,
+        });
+      for (let i = 0; i < 2; i++) {
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const r = yield* scoped(declare, (x) => [x.id]);
+            assert.strictEqual(lookup(r.id), r);
+          }),
+        );
+        assert.isUndefined(lookup("test::reloaded"));
+      }
+    }),
+  );
+
+  it("a bad cron expression is a boot failure", () => {
+    assert.throws(() => Rule.onCron("every tuesday", FoldersPort), /cron/);
+    Rule.onCron("0 9 * * 1-5", FoldersPort);
+  });
 });

@@ -6,7 +6,6 @@ import { type Declared, type FnName, fnName, type GroupName, groupName, type Met
 import { register } from "./registry.ts";
 import { isStub, NotImplemented, intentOf, type Stub } from "./stub.ts";
 
-/** An agent that acts for a person under a `people::agent-grant`. */
 /** An agent that acts for a person; a domain narrows it to its own names. */
 export type Agent = string;
 /**

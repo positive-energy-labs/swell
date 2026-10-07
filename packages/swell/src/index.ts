@@ -1,20 +1,37 @@
 /**
  * swell: evidence in, moves out. A control spec compiles into kernel primitives: sensors and observers measure
- * a plant into measurements, a signatures rollup folds their signals, a loop proposes one move per signature
- * when its evidence crosses the threshold, an operator's verdict applies it. Node-only parts live in `./controller`.
+ * a plant into measurements, a signatures rollup folds their signals, a loop proposes one move per signature per
+ * arming when its evidence crosses the threshold, an operator's verdict applies it. Node-only parts live in
+ * `./controller`; test doubles in `./testing`.
  */
 export * from "./facts.ts";
-export { BadRead, ControllerApi, DoorAuth, HmiGroup, NoToken, OperatorGroup, PeerGroup } from "./door.ts";
 export {
-  type ControlSpec,
-  Decide,
-  defaultThreshold,
+  BadRead,
+  ControllerApi,
+  HmiGroup,
+  NoToken,
+  Operator,
+  OperatorAuth,
+  OperatorGroup,
+  PeerAuth,
+  PeerGroup,
+  Plan,
+  ProposalView,
+  View,
+} from "./door.ts";
+export { Decide, defaultThreshold, FeedbackPayload, Retry, rulesOf, subjectOf } from "./loop.ts";
+export {
+  ActuatorSpec,
+  ControlSpec,
+  decodeControl,
   defineControl,
-  evidenceHash,
-  type FeedbackPayload,
-  type LoopSpec,
-  rulesOf,
-} from "./loop.ts";
+  GitPlantSpec,
+  LoopSpec,
+  Mode,
+  ObserverSpec,
+  PlantSpec,
+  SensorSpec,
+} from "./spec.ts";
 export {
   citeOf,
   fieldsOf,
@@ -28,23 +45,16 @@ export {
   urnOf,
 } from "./peer.ts";
 export {
-  type ActuatorSpec,
-  type Brief,
-  type Changes,
-  type Decision,
-  fakePlant,
-  fakeWorld,
-  type FakeWorld,
+  Brief,
+  Changes,
+  Decision,
   type Instrument,
   Measured,
   MeasuredJson,
   measureFailed,
-  type ObserverSpec,
   Plant,
   PlantError,
   PlantPort,
   type PlantService,
-  type PlantSpec,
-  type Sampled,
-  type SensorSpec,
+  Sampled,
 } from "./plant.ts";

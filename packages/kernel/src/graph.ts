@@ -1,3 +1,4 @@
+import { absurd } from "effect/Function";
 import type { Meta } from "./meta.ts";
 import type { Primitive } from "./registry.ts";
 
@@ -10,6 +11,8 @@ export interface Actor {
   readonly id: string;
   readonly label: string;
   readonly plain: string;
+  /** The graph layer the domain draws its actors in; the kernel names none. */
+  readonly layer: string;
   readonly agent?: boolean;
   readonly src: string;
 }
@@ -81,7 +84,7 @@ export const declare = (
     id: a.id,
     kind: "actor",
     label: a.label,
-    layer: "people",
+    layer: a.layer,
     plain: a.plain,
     ruled: true,
     src: a.src,
@@ -158,6 +161,8 @@ export const declare = (
           ...ne("shows", p.shows),
         });
         break;
+      default:
+        return absurd(p);
     }
   }
   return { layers, kinds: KINDS, nodes, stories };

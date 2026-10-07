@@ -1,4 +1,4 @@
-import { Effect, type Schema } from "effect";
+import { Cron, Duration, Effect, Result, type Schema } from "effect";
 import type { Reader } from "./db.ts";
 import type { AnyFact, Draft } from "./fact.ts";
 import type { Declared, Meta } from "./meta.ts";
@@ -11,11 +11,12 @@ export type Trigger<R extends AnyFact> =
   | { readonly on: "cron"; readonly cron: string; readonly clock: AnyPort };
 
 export const onFact = <F extends AnyFact>(fact: F): Trigger<F> => ({ on: "fact", fact });
-export const onCron = (cron: string, clock: AnyPort): Trigger<never> => ({
-  on: "cron",
-  cron,
-  clock,
-});
+/** Parsed at declaration, so a bad expression is a boot failure, never a rule that silently never fires. */
+export const onCron = (cron: string, clock: AnyPort): Trigger<never> => {
+  const parsed = Cron.parse(cron);
+  if (Result.isFailure(parsed)) throw new Error(`kernel: cron '${cron}': ${parsed.failure.message}`);
+  return { on: "cron", cron, clock };
+};
 
 /** One thing a rule wants to exist. `urn` plus the rule id is the receipt key. */
 export interface Subject {
@@ -78,9 +79,11 @@ export const make = <
   readonly triggers: ReadonlyArray<Trigger<R>>;
   readonly subject: Schema.Codec<S, any>;
   readonly maxAttempts?: number;
-  readonly leaseMs?: number;
+  /** How long an attempt with no receipt is presumed alive. Default fifteen minutes. */
+  readonly lease?: Duration.Input;
   readonly want: Stub | ((db: Reader<R>, ctx: WantCtx) => Effect.Effect<ReadonlyArray<S>>);
-  readonly effect: Stub | ((subject: S) => Effect.Effect<Outcome<W>, unknown, ServiceOf<U>>);
+  /** `NoInfer`: what a rule may append is what it declares in `writes`, never what its effect happens to return. */
+  readonly effect: Stub | ((subject: S) => Effect.Effect<Outcome<NoInfer<W>>, unknown, ServiceOf<U>>);
   readonly meta: Meta;
 }): Rule<Id, R, U, W, S> => {
   const { want, effect } = def;
@@ -94,7 +97,7 @@ export const make = <
     triggers: def.triggers,
     subject: def.subject,
     maxAttempts: def.maxAttempts ?? 5,
-    leaseMs: def.leaseMs ?? 15 * 60_000,
+    leaseMs: Duration.toMillis(Duration.fromInputUnsafe(def.lease ?? Duration.minutes(15))),
     // A stub want wants nothing, so a stub rule is inert instead of crashing every sweep.
     want: isStub(want)
       ? () => Effect.succeed([])

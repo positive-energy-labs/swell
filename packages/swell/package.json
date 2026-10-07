@@ -9,18 +9,20 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./controller": "./src/controller.ts"
+    "./controller": "./src/controller.ts",
+    "./testing": "./src/testing.ts"
   },
   "scripts": {
     "test": "vp test"
   },
   "dependencies": {
-    "@effect/platform-node": "4.0.0-rc.118",
+    "@effect/platform-node": "4.0.2",
+    "@effect/sql-sqlite-node": "4.0.2",
     "@swell/kernel": "workspace:*",
-    "effect": "4.0.0-rc.118"
+    "effect": "4.0.2"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-rc.118",
+    "@effect/vitest": "4.0.2",
     "@types/node": "25.6.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
     "vite-plus": "1.0.0",

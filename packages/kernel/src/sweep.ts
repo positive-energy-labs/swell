@@ -1,5 +1,6 @@
 import { Cause, Effect, Exit, Layer, Option, Schema } from "effect";
 import type { Db, Reader } from "./db.ts";
+import type { InvariantViolation } from "./errors.ts";
 import type { AnyFact, Id } from "./fact.ts";
 import { Attempt, Receipt, RetryGranted, RuleEnabled } from "./facts.ts";
 import type { AnyPort } from "./port.ts";
@@ -24,6 +25,9 @@ export interface Plan {
 
 const PER_SUBJECT = 64;
 
+/** The newest rows first: a long-lived subject's latest attempt and its ok receipt are never past the limit. */
+const newest = { order: "desc", limit: PER_SUBJECT } as const;
+
 export const plan = Effect.fn("kernel/plan")(function* (rule: AnyRule, db: Reader<AnyFact>, now: number) {
   const enabled = latest(yield* db.find(RuleEnabled, "by_key", { eq: [rule.id], limit: 16 }));
   const empty: Plan = {
@@ -35,7 +39,7 @@ export const plan = Effect.fn("kernel/plan")(function* (rule: AnyRule, db: Reade
     pending: [],
     dead: [],
   };
-  if (Option.isNone(enabled)) return { ...empty, enabled: Option.isSome(enabled) };
+  if (Option.isNone(enabled)) return empty;
   const wants = yield* rule.want(db, { now, enabledAt: enabled.value.at });
   let done = 0;
   let inflight = 0;
@@ -43,20 +47,21 @@ export const plan = Effect.fn("kernel/plan")(function* (rule: AnyRule, db: Reade
   const dead: Array<Plan["dead"][number]> = [];
   for (const subject of wants) {
     const eq = [rule.id, subject.urn];
-    const receipts = yield* db.find(Receipt, "by_key", { eq, limit: PER_SUBJECT });
+    const receipts = yield* db.find(Receipt, "by_key", { eq, ...newest });
     if (receipts.some((r) => r.outcome === "ok")) {
       done++;
       continue;
     }
-    const attempts = yield* db.find(Attempt, "by_key", { eq, limit: PER_SUBJECT });
+    const attempts = yield* db.find(Attempt, "by_key", { eq, ...newest });
     const settled = new Set(receipts.map((r) => r.attempt));
     if (attempts.some((a) => !settled.has(a._id) && a.at > now - rule.leaseMs)) {
       inflight++;
       continue;
     }
-    const grant = latest(yield* db.find(RetryGranted, "by_key", { eq, limit: PER_SUBJECT }));
-    const since = Option.match(grant, { onNone: () => 0, onSome: (g) => g.at });
-    const failed = receipts.filter((r) => r.outcome === "failed" && r.at >= since);
+    // Creation order, not `at`: a grant and a failure in the same millisecond are still ordered.
+    const grant = latest(yield* db.find(RetryGranted, "by_key", { eq, ...newest }));
+    const since = Option.match(grant, { onNone: () => -1, onSome: (g) => g._creationTime });
+    const failed = receipts.filter((r) => r.outcome === "failed" && r._creationTime > since);
     if (failed.length >= rule.maxAttempts) {
       dead.push({
         urn: subject.urn,
@@ -74,12 +79,26 @@ export const plan = Effect.fn("kernel/plan")(function* (rule: AnyRule, db: Reade
 });
 
 /** What crosses the scheduler hop into the action. Everything is encoded; nothing is ambient. */
-export interface Job {
-  readonly rule: string;
-  readonly attempt: string;
-  readonly subject: string;
-  readonly traceparent: string | undefined;
-}
+export const Job = Schema.Struct({
+  rule: Schema.String,
+  attempt: Schema.String,
+  urn: Schema.String,
+  /** The subject as JSON, decoded by the rule's own subject schema on the far side. */
+  subject: Schema.String,
+  traceparent: Schema.UndefinedOr(Schema.String),
+});
+export type Job = typeof Job.Type;
+
+/** The enabler is who a rule acts for: its writes carry `via`, the person (or controller) that switched it on. */
+export const enablerOf = (rule: string, db: Reader<AnyFact>) =>
+  db.find(RuleEnabled, "by_key", { eq: [rule], limit: 16 }).pipe(
+    Effect.map((rows) =>
+      latest(rows).pipe(
+        Option.map((r) => r.via ?? r.by),
+        Option.getOrUndefined,
+      ),
+    ),
+  );
 
 /** The sweep, inside one mutation: the attempt and the scheduled effect commit together or not at all. */
 export const sweep = Effect.fn("kernel/sweep")(function* (
@@ -95,7 +114,13 @@ export const sweep = Effect.fn("kernel/sweep")(function* (
     const subject = JSON.stringify(
       yield* Schema.encodeUnknownEffect(rule.subject)(item.subject).pipe(Effect.orDie),
     );
-    yield* schedule({ rule: rule.id, attempt, subject, traceparent: Option.getOrUndefined(tp) });
+    yield* schedule({
+      rule: rule.id,
+      attempt,
+      urn: item.urn,
+      subject,
+      traceparent: Option.getOrUndefined(tp),
+    });
   }
   return p;
 });
@@ -110,27 +135,47 @@ export type Settled =
   /** The worker died. Write nothing; the lease expires and the next sweep retries. */
   | { readonly outcome: "killed" };
 
+export class UndeclaredWrite extends Schema.TaggedError<UndeclaredWrite>()("UndeclaredWrite", {
+  rule: Schema.String,
+  fact: Schema.String,
+}) {}
+
+type AnyCodec = Schema.Codec<unknown, unknown>;
+
+/**
+ * Run the rule's effect and everything that can fail after it (the declared-writes check, encoding each
+ * draft) inside one Exit, so every failure becomes a `failed` receipt and counts toward `maxAttempts`. Only
+ * an interrupt is `killed`.
+ */
 export const execute = Effect.fn("kernel/execute")(function* (
   rule: AnyRule,
   job: Job,
   ports: (port: AnyPort) => Layer.Layer<any>,
 ) {
-  const subject = yield* Schema.decodeUnknownEffect(rule.subject)(JSON.parse(job.subject)).pipe(Effect.orDie);
   const layer = rule.uses.reduce(
     (acc: Layer.Layer<any>, p: AnyPort) => Layer.merge(acc, ports(p)),
     Layer.empty,
   );
-  const provided = Effect.provide(rule.effect(subject), layer) as Effect.Effect<Outcome<AnyFact>, unknown>;
-  const exit = yield* provided.pipe(Trace.continueFrom(job.traceparent), Effect.exit);
+  const writes = new Set(rule.writes.map((w: AnyFact) => w.id));
+  const settled = Effect.gen(function* () {
+    const subject = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(rule.subject as AnyCodec))(
+      job.subject,
+    );
+    const o = yield* Effect.provide(rule.effect(subject), layer) as Effect.Effect<Outcome<AnyFact>, unknown>;
+    const append = yield* Effect.forEach(
+      o.append ?? [],
+      (a): Effect.Effect<{ fact: string; draft: unknown }, UndeclaredWrite | Schema.SchemaError> =>
+        writes.has(a.fact.id)
+          ? Schema.encodeUnknownEffect(a.fact.draft as unknown as AnyCodec)(a.draft).pipe(
+              Effect.map((draft) => ({ fact: a.fact.id, draft })),
+            )
+          : Effect.fail(new UndeclaredWrite({ rule: rule.id, fact: a.fact.id })),
+    );
+    return { outcome: "ok", result: o.result, append } satisfies Settled;
+  });
+  const exit = yield* settled.pipe(Trace.continueFrom(job.traceparent), Effect.exit);
   return Exit.match(exit, {
-    onSuccess: (o: Outcome<AnyFact>): Settled => ({
-      outcome: "ok",
-      result: o.result,
-      append: (o.append ?? []).map((a) => ({
-        fact: a.fact.id,
-        draft: Schema.encodeUnknownSync(a.fact.draft as unknown as Schema.Codec<unknown, unknown>)(a.draft),
-      })),
-    }),
+    onSuccess: (s): Settled => s,
     onFailure: (cause): Settled =>
       Cause.hasInterruptsOnly(cause)
         ? { outcome: "killed" }
@@ -138,38 +183,28 @@ export const execute = Effect.fn("kernel/execute")(function* (
   });
 });
 
+/**
+ * Write the settled outcome: the output facts and the receipt in the caller's one transaction. A write the
+ * store refuses (a unique key already taken) fails here with the violation, and the caller settles the
+ * attempt as failed in a fresh transaction instead.
+ */
 export const complete = Effect.fn("kernel/complete")(function* (
   rule: AnyRule,
   job: Job,
   settled: Exclude<Settled, { outcome: "killed" }>,
   db: Db<AnyFact, AnyFact>,
-) {
+): Effect.fn.Return<Id<"kernel::receipt">, InvariantViolation> {
   const attempt = job.attempt as Id<"kernel::attempt">;
+  const base = { rule: rule.id, subject: job.urn, attempt };
   if (settled.outcome === "failed") {
-    return yield* db
-      .append(Receipt, {
-        rule: rule.id,
-        subject: urnOf(job),
-        attempt,
-        outcome: "failed",
-        error: settled.error,
-      })
-      .pipe(Effect.orDie);
+    return yield* db.append(Receipt, { ...base, outcome: "failed", error: settled.error });
   }
   for (const a of settled.append) {
-    const fact = rule.writes.find((w: AnyFact) => w.id === a.fact);
-    if (fact === undefined)
-      return yield* Effect.die(
-        new Error(`${rule.id} appended ${a.fact}, which it does not declare in writes`),
-      );
-    const draft = yield* Schema.decodeUnknownEffect(fact.draft as unknown as Schema.Codec<unknown, unknown>)(
-      a.draft,
-    ).pipe(Effect.orDie);
-    yield* db.append(fact, draft).pipe(Effect.orDie);
+    const fact = rule.writes.find((w: AnyFact) => w.id === a.fact)!;
+    const draft = yield* Schema.decodeUnknownEffect(fact.draft as unknown as AnyCodec)(a.draft).pipe(
+      Effect.orDie,
+    );
+    yield* db.append(fact, draft);
   }
-  return yield* db
-    .append(Receipt, { rule: rule.id, subject: urnOf(job), attempt, outcome: "ok", result: settled.result })
-    .pipe(Effect.orDie);
+  return yield* db.append(Receipt, { ...base, outcome: "ok", result: settled.result });
 });
-
-const urnOf = (job: Job): string => (JSON.parse(job.subject) as { urn: string }).urn;

@@ -1,6 +1,6 @@
 /** Type test with no runtime: `tsc` fails if either `@ts-expect-error` stops being an error. */
 import { Context, Effect, Layer, Schema } from "effect";
-import { Port, Rule } from "../src/index.ts";
+import { Fact, Port, Rule } from "../src/index.ts";
 
 const meta = {
   owner: "t",
@@ -47,4 +47,27 @@ Rule.make({
       const g = yield* Gmail;
       return { result: yield* g.send };
     }),
+});
+
+const Written = Fact.make({
+  id: "types::written",
+  class: "event",
+  fields: { n: Schema.Number },
+  meta,
+});
+
+Rule.make({
+  ...base,
+  id: "types::declared-write",
+  uses: [],
+  writes: [Written],
+  effect: () => Effect.succeed({ result: "", append: [{ fact: Written, draft: { n: 1 } }] }),
+});
+
+Rule.make({
+  ...base,
+  id: "types::undeclared-write",
+  uses: [],
+  // @ts-expect-error A rule with no `writes` appends nothing: the effect cannot widen what it may write.
+  effect: () => Effect.succeed({ result: "", append: [{ fact: Written, draft: { n: 1 } }] }),
 });

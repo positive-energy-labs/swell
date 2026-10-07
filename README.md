@@ -20,7 +20,7 @@ The vocabulary is control theory (plant, sensor, observer, threshold, actuator, 
 
 A sensor is any script that prints JSON, so deterministic checks cost nothing to add. An observer is an agent for what numbers can't hold, held to a fixed vocabulary.
 
-A plant is anything you can sample and change. Git ships first, and the core never assumes it.
+A plant is anything you can sample and change. Git is the one kind today; the next is an adapter behind the same port, never a change to the loop.
 
 ```ts
 // swell.config.ts at the plant's root
@@ -36,11 +36,11 @@ export default {
 ```
 
 ```sh
-swell serve --config swell.config.ts --token <secret>   # sample every 60 s, serve the operator's screen on :4747
+swell serve --config swell.config.ts --operators you=<secret>   # sample every 60 s, serve the operator's screen on :4747
 ```
 
 `AGENTS.md` holds the vocabulary, the rulings, and what is proven. `pnpm verify` is the definition of done.
 
 ## For agents
 
-swell: a control loop over an append-only fact kernel. Problem: act once on agreed evidence, never on a first signal. Memory: every measurement, proposal and verdict is a cited fact; a dismissal holds until the evidence set grows (hysteresis). Control: moves wait for the operator in manual mode, and every actuator has a per-day limit. Vocabulary: plant, sensor (deterministic, any argv printing `{signals}`), observer (model, closed vocabulary), measurement, signal, signature, threshold, actuator, move, mode, operator. Generality: a plant is anything that can be sampled and changed; git is the first adapter. Declare a plant in `swell.config.ts`, then run `swell serve`.
+swell: a control loop over an append-only fact kernel. Problem: act once on agreed evidence, never on a first signal. Memory: every measurement, proposal and verdict is a cited fact; a dismissal holds until the evidence set grows (hysteresis), and once a move lands its signature re-arms only if it is seen again. Control: moves wait for the operator in manual mode, and every actuator has a per-day limit. Vocabulary: plant, sensor (deterministic, any argv printing `{signals}`), observer (model, closed vocabulary), measurement, signal, signature, threshold, actuator, move, mode, operator. Generality: a plant is anything that can be sampled and changed; git is the first adapter. Declare a plant in `swell.config.ts`, then run `swell serve`.

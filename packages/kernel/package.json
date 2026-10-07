@@ -14,10 +14,10 @@
     "test": "vp test"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.118"
+    "effect": "4.0.2"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-rc.118",
+    "@effect/vitest": "4.0.2",
     "@types/node": "25.6.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
     "vite-plus": "1.0.0",

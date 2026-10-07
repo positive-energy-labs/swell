@@ -6,7 +6,7 @@ import * as Fact from "./fact.ts";
  * an effect and a receipt when the effect settles, so "what ran" has exactly one store.
  */
 const kernel = {
-  owner: "kai",
+  owner: "kernel",
   audience: "dev",
   layer: "core",
   ruled: true,

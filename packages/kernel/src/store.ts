@@ -1,4 +1,4 @@
-import { Effect, Option } from "effect";
+import { Effect, Option, Schema } from "effect";
 import { type Db, type Find, MAX_LIMIT, type Reader } from "./db.ts";
 import { violation } from "./errors.ts";
 import type { AnyFact, Draft, Id, IndexName } from "./fact.ts";
@@ -57,28 +57,29 @@ export interface WriteCtx {
   readonly trace: string | undefined;
 }
 
-const bounded = (find: Find): Find => {
-  if (!(find.limit > 0 && find.limit <= MAX_LIMIT)) {
-    throw new Error(`kernel: read limit ${find.limit} is outside (0, ${MAX_LIMIT}]`);
-  }
-  return find;
-};
+/** An unbounded read is a defect of the caller, raised in the Effect so it fails the transaction it is in. */
+const bounded = <A>(limit: number, read: () => Effect.Effect<A>): Effect.Effect<A> =>
+  limit > 0 && limit <= MAX_LIMIT
+    ? Effect.suspend(read)
+    : Effect.die(new Error(`kernel: read limit ${limit} is outside (0, ${MAX_LIMIT}]`));
 
 export const makeReader = (store: Store): Reader<AnyFact> => ({
   get: (fact, id) => store.get(fact.table, id),
   find: (fact, index, find) => {
     const fields = fact.indexes[index];
     if (fields === undefined) return Effect.die(new Error(`${fact.id} has no index ${index}`));
-    return store.find(fact.table, index, fields, bounded(find));
+    return bounded(find.limit, () => store.find(fact.table, index, fields, find));
   },
   tally: store.tally.get,
   tallies: (projection, { gte, lt, limit }) =>
-    store.tally.range(projection, gte, lt, bounded({ limit }).limit),
+    bounded(limit, () => store.tally.range(projection, gte, lt, limit)),
   snapshot: (s, key) => store.snapshot.get(s.id, key).pipe(Effect.map(Option.map((v) => JSON.parse(v)))),
   shelf: (s, shelf, limit) =>
-    store.snapshot
-      .list(s.id, shelf, bounded({ limit }).limit)
-      .pipe(Effect.map((rows) => rows.map((r) => ({ key: r.key, value: JSON.parse(r.value) })))),
+    bounded(limit, () =>
+      store.snapshot
+        .list(s.id, shelf, limit)
+        .pipe(Effect.map((rows) => rows.map((r) => ({ key: r.key, value: JSON.parse(r.value) })))),
+    ),
 });
 
 /** Every declared rollup and snapshot once, even when several projections declare the same one. */
@@ -147,16 +148,28 @@ export const makeDb = (store: Store, ctx: WriteCtx): Db<AnyFact, AnyFact> => {
           );
         }
       }
+      // The draft is checked against the fact's own schema at the disk edge: a cast upstream never lands a bad row.
+      const encoded = yield* Schema.encodeUnknownEffect(
+        fact.draft as unknown as Schema.Codec<unknown, unknown>,
+      )(draft).pipe(
+        Effect.mapError((e) => new Error(`kernel: ${fact.id} draft: ${e.message}`)),
+        Effect.orDie,
+      );
       const trace = ctx.trace ?? Option.getOrUndefined(yield* Trace.current);
       const doc = {
-        ...(draft as object),
+        ...(encoded as object),
         at: ctx.now,
         by: ctx.by,
         ...(ctx.via === undefined ? {} : { via: ctx.via }),
         ...(trace === undefined ? {} : { trace }),
       };
       const id = yield* store.insert(fact.table, doc);
-      const row = { ...doc, _id: id, _creationTime: ctx.now } as never;
+      // Read back, so rollups and snapshots see the row as stored, with the store's own creation time.
+      const row = Option.getOrElse(yield* store.get(fact.table, id), () => ({
+        ...doc,
+        _id: id,
+        _creationTime: ctx.now,
+      })) as never;
       for (const r of rollups) {
         if (r.on.id !== fact.id) continue;
         for (const [key, delta] of yield* r.apply(row, reader)) yield* store.tally.add(r.id, key, delta);

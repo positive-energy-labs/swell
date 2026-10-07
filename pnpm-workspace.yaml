@@ -4,11 +4,12 @@ packages:
 
 catalogMode: prefer
 
-# Pinned to The Current's catalog exactly; a drift here forks Effect's types for every consumer.
+# Pinned exactly and in step with The Current's catalog; a drift forks Effect's types for every consumer of the vendored kernel.
 catalog:
-  effect: 4.0.0-rc.118
-  "@effect/vitest": 4.0.0-rc.118
-  "@effect/platform-node": 4.0.0-rc.118
+  effect: 4.0.2
+  "@effect/vitest": 4.0.2
+  "@effect/platform-node": 4.0.2
+  "@effect/sql-sqlite-node": 4.0.2
   "@types/node": 25.6.2
   typescript: 7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@1.0.0
@@ -16,7 +17,7 @@ catalog:
   vitest: 5.0.1
 
 overrides:
-  "@effect/platform-node-shared": 4.0.0-rc.118
+  "@effect/platform-node-shared": 4.0.2
   vite: "catalog:"
   vitest: "catalog:"
 

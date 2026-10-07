@@ -1,5 +1,5 @@
 import { Fact, type Meta, Projection, type Reader } from "@swell/kernel";
-import { Effect, Schema } from "effect";
+import { Array as Arr, DateTime, Effect, Number as Num, Order, Record as Rec, Schema } from "effect";
 
 export const meta = (label: string, plain: string, src: string): Meta => ({
   label,
@@ -12,11 +12,20 @@ export const meta = (label: string, plain: string, src: string): Meta => ({
 });
 
 /**
+ * What signals group under. Printable ASCII without `|` and `~`: a signature is part of a tally key, and a
+ * character past `~` would sort out of the range a window reads. An instrument that prints another is a failed
+ * measurement, never a corrupted or invisible tally.
+ */
+export const SignatureId = Schema.String.check(
+  Schema.isPattern(/^[\x21-\x7b\x7d]+$/, { expected: "a signature: printable ASCII without | or ~" }),
+);
+
+/**
  * One thing a sensor or observer saw. `signature` is the identity signals group under; an observer draws it
  * from a closed vocabulary.
  */
 export const Signal = Schema.Struct({
-  signature: Schema.String,
+  signature: SignatureId,
   mechanism: Schema.String,
   path: Schema.optionalKey(Schema.String),
   cite: Schema.optionalKey(Schema.String),
@@ -66,7 +75,7 @@ export const Measurement = Fact.make({
   key: ["plant", "instrument", "sample"],
   unique: true,
   indexes: { by_instrument: ["plant", "instrument", "at"] },
-  invariants: ["a failed measurement carries `error` and no signals; it is never a zero"],
+  invariants: ["a failed measurement carries `error` and no signals; it is never a zero, and never a run"],
   meta: meta(
     "Measurement",
     "What one instrument saw in one sample, with how much it looked at.",
@@ -96,7 +105,8 @@ export const Cite = Fact.make({
 /**
  * One loop's proposed move for one signature. `apply` is target-typed and opaque to the kernel: a PR ref for
  * git, a command call for The Current, a port call for Drive. `sources` is the evidence set at proposal time,
- * so a dismissal is keyed to it and holds until the set grows: hysteresis.
+ * so a dismissal is keyed to it and holds until the set grows: hysteresis. `arming` counts the moves on this
+ * signature: once one is made (or can no longer be), the next is a new arming with no dismissals behind it.
  */
 export const Proposal = Fact.make({
   id: "control::proposal",
@@ -106,6 +116,7 @@ export const Proposal = Fact.make({
     loop: Schema.String,
     subject: Schema.String,
     signature: Schema.String,
+    arming: Schema.Int,
     operator: Schema.String,
     apply: Schema.String,
     text: Schema.String,
@@ -114,10 +125,14 @@ export const Proposal = Fact.make({
   },
   key: ["plant", "loop", "subject"],
   unique: true,
-  indexes: { by_loop: ["plant", "loop", "at"], by_operator: ["operator", "at"] },
+  indexes: {
+    by_loop: ["plant", "loop", "at"],
+    by_signature: ["plant", "loop", "signature", "at"],
+    by_operator: ["operator", "at"],
+  },
   invariants: [
     "a loop never moves a plant without a verdict; a yes applies exactly `apply`",
-    "the subject is the signature plus the evidence set, so new evidence is a new subject",
+    "the subject is the signature, the evidence set and the arming, so new evidence is a new subject",
   ],
   meta: meta(
     "Proposal",
@@ -140,115 +155,132 @@ export const Verdict = Fact.make({
   },
   key: ["plant", "loop", "subject"],
   unique: true,
-  indexes: { by_plant: ["plant", "at"] },
+  indexes: { by_plant: ["plant", "at"], by_accept: ["plant", "accept", "at"] },
   meta: meta("Verdict", "The yes or no on a proposal.", "only a verdict turns a proposal into a move"),
 });
 
 export const ControlFacts = [Sample, Measurement, Cite, Proposal, Verdict] as const;
 
-/** ISO week key, so tallies stay bounded and a fixed signature decays out of the window. */
-export const week = (at: number): string => {
-  const d = new Date(at);
-  // Midnight first: without it any instant past 12:00 UTC rounds into the next week.
-  d.setUTCHours(0, 0, 0, 0);
-  const day = (d.getUTCDay() + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - day + 3);
-  const year = d.getUTCFullYear();
-  const jan4 = Date.UTC(year, 0, 4);
-  const n = 1 + Math.round((d.getTime() - jan4) / 604_800_000 + ((new Date(jan4).getUTCDay() + 6) % 7) / 7);
-  return `${year}-W${String(n).padStart(2, "0")}`;
-};
+const utc = (at: number) => DateTime.makeUnsafe(at);
+
+/** The tally week: the UTC Monday it starts on, as an ISO date. Sortable, so a window is a run of keys. */
+export const week = (at: number): string =>
+  DateTime.formatIsoDate(DateTime.startOf(utc(at), "week", { weekStartsOn: 1 }));
+
+/** Midnight UTC of the day `now` falls in: where `limit.perDay` starts counting. */
+export const dayStart = (now: number): number => DateTime.toEpochMillis(DateTime.startOf(utc(now), "day"));
 
 const weeksBack = (at: number, n: number): ReadonlyArray<string> =>
-  Array.from({ length: n }, (_, i) => week(at - i * 604_800_000));
+  Arr.makeBy(n, (i) => week(DateTime.toEpochMillis(DateTime.subtract(utc(at), { weeks: i }))));
+
+const ROLLUP = "control::signatures";
 
 /**
- * Tally keys: `<plant>|run|<instrument>|<week>` counts measurements; `<plant>|sig|<signature>|<week>` counts
- * `hits` (signals), `seen` (measurements that saw it, once however many signals) and marks each source.
+ * Tally keys, week first so a window is one bounded read per week: `<plant>|<week>|run|<instrument>` counts the
+ * measurements that ran (`runs`) and those that failed (`failed`, never a run that saw nothing);
+ * `<plant>|<week>|sig|<signature>` counts `hits` (signals), `seen` (measurements that saw it, once however many
+ * signals) and marks each source.
  */
 export const signaturesRollup = Projection.rollup({
-  id: "control::signatures",
+  id: ROLLUP,
   on: Measurement,
   apply: (row) =>
     Effect.sync(() => {
-      const w = week(row.at);
-      const out: Array<readonly [string, Record<string, number>]> = [
-        [`${row.plant}|run|${row.instrument}|${w}`, { runs: 1 }],
+      const at = `${row.plant}|${week(row.at)}`;
+      if (row.error !== undefined) return [[`${at}|run|${row.instrument}`, { failed: 1 }] as const];
+      return [
+        [`${at}|run|${row.instrument}`, { runs: 1 }] as const,
+        ...Rec.collect(
+          Arr.groupBy(row.signals, (s) => s.signature),
+          (sig, xs) =>
+            [`${at}|sig|${sig}`, { hits: xs.length, seen: 1, [`src:${row.instrument}`]: 1 }] as const,
+        ),
       ];
-      const hits = new Map<string, number>();
-      for (const s of row.signals) hits.set(s.signature, (hits.get(s.signature) ?? 0) + 1);
-      for (const [sig, n] of hits)
-        out.push([`${row.plant}|sig|${sig}|${w}`, { hits: n, seen: 1, [`src:${row.instrument}`]: 1 }]);
-      return out;
     }),
 });
 
-/** A signature and its tally over the window. It is never a row: it is folded from the rollup on read. */
-export interface Signature {
-  readonly plant: string;
-  readonly signature: string;
-  /** Distinct instruments that saw it in the window. Strength is this, never a count. */
-  readonly sources: ReadonlyArray<string>;
-  /** Signals in the window: a measurement with two signals of one signature adds two. */
-  readonly hits: number;
-  /** Measurements in the window that saw it at least once, however many signals each held. */
-  readonly seen: number;
-  /** Measurements in the window by the sources that saw it. */
-  readonly runs: number;
-  /** `seen / runs`, 0..1: the share of runs that saw it. */
-  readonly rate: number;
-}
-
-/** Signatures of a plant over the last `weeks`, folded from the rollup. One bounded read per key family. */
-export const signaturesOf = (db: Reader<never>, plant: string, now: number, weeks = 4) =>
-  Effect.gen(function* () {
-    const window = new Set(weeksBack(now, weeks));
-    const inWindow = (key: string) => window.has(key.slice(key.lastIndexOf("|") + 1));
-    const runs = new Map<string, number>();
-    for (const r of yield* db.tallies("control::signatures", {
-      gte: `${plant}|run|`,
-      lt: `${plant}|run|~`,
-      limit: 2048,
-    })) {
-      if (!inWindow(r.key)) continue;
-      const instrument = r.key.split("|")[2]!;
-      runs.set(instrument, (runs.get(instrument) ?? 0) + (r.value.runs ?? 0));
-    }
-    const sigs = new Map<string, { hits: number; seen: number; sources: Set<string> }>();
-    for (const r of yield* db.tallies("control::signatures", {
-      gte: `${plant}|sig|`,
-      lt: `${plant}|sig|~`,
-      limit: 2048,
-    })) {
-      if (!inWindow(r.key)) continue;
-      const sig = r.key.slice(`${plant}|sig|`.length, r.key.lastIndexOf("|"));
-      const cur = sigs.get(sig) ?? { hits: 0, seen: 0, sources: new Set<string>() };
-      cur.hits += r.value.hits ?? 0;
-      cur.seen += r.value.seen ?? 0;
-      for (const k of Object.keys(r.value)) if (k.startsWith("src:")) cur.sources.add(k.slice(4));
-      sigs.set(sig, cur);
-    }
-    return [...sigs].map(([signature, { hits, seen, sources }]): Signature => {
-      const srcs = [...sources].sort();
-      const r = srcs.reduce((n, s) => n + (runs.get(s) ?? 0), 0);
-      return { plant, signature, sources: srcs, hits, seen, runs: r, rate: r === 0 ? 0 : seen / r };
-    });
-  });
-
-export const SignatureSchema = Schema.Struct({
+export const Signature = Schema.Struct({
   plant: Schema.String,
   signature: Schema.String,
+  /** Distinct instruments that saw it in the window. Strength is this, never a count. */
   sources: Schema.Array(Schema.String),
+  /** Signals in the window: a measurement with two signals of one signature adds two. */
   hits: Schema.Number,
+  /** Measurements in the window that saw it at least once, however many signals each held. */
   seen: Schema.Number,
+  /** Measurements in the window by the sources that saw it. A failed measurement is not a run. */
   runs: Schema.Number,
+  /** `seen / runs`, 0..1: the share of runs that saw it. */
   rate: Schema.Number,
+});
+/** A signature and its tally over the window. It is never a row: it is folded from the rollup on read. */
+export type Signature = typeof Signature.Type;
+
+const PER_WEEK = 2048;
+
+/** One exact read per window week. A week that fills the limit is a defect, said out loud, never a silent cut. */
+const weekRows = (db: Reader<never>, plant: string, w: string) =>
+  db
+    .tallies(ROLLUP, { gte: `${plant}|${w}|`, lt: `${plant}|${w}|~`, limit: PER_WEEK })
+    .pipe(
+      Effect.flatMap((rows) =>
+        rows.length === PER_WEEK
+          ? Effect.die(new Error(`swell: ${plant} week ${w} has ${PER_WEEK}+ tally rows; widen the read`))
+          : Effect.succeed(rows.map((r) => ({ rest: r.key.slice(`${plant}|${w}|`.length), value: r.value }))),
+      ),
+    );
+
+const sources = (value: Readonly<Record<string, number>>) =>
+  Rec.keys(value)
+    .filter((k) => k.startsWith("src:"))
+    .map((k) => k.slice(4));
+
+/**
+ * Signatures of a plant over the last `weeks`, folded from the rollup. An observer's `new:X` joins `X` when another
+ * source saw `X`: the outsider then has its second source.
+ */
+export const signaturesOf = Effect.fn("swell/signaturesOf")(function* (
+  db: Reader<never>,
+  plant: string,
+  now: number,
+  weeks = 4,
+) {
+  const rows = (yield* Effect.forEach(weeksBack(now, weeks), (w) => weekRows(db, plant, w))).flat();
+  const runs = Rec.map(
+    Arr.groupBy(
+      rows.filter((r) => r.rest.startsWith("run|")),
+      (r) => r.rest.slice(4),
+    ),
+    (xs) => Num.sumAll(xs.map((x) => x.value.runs ?? 0)),
+  );
+  const bySig = Arr.groupBy(
+    rows.filter((r) => r.rest.startsWith("sig|")),
+    (r) => r.rest.slice(4),
+  );
+  for (const sig of Rec.keys(bySig)) {
+    const known = sig.startsWith("new:") ? sig.slice(4) : undefined;
+    if (known !== undefined && bySig[known] !== undefined) {
+      bySig[known] = [...bySig[known], ...bySig[sig]!];
+      delete bySig[sig];
+    }
+  }
+  const folded = Rec.collect(bySig, (signature, xs): Signature => {
+    const srcs = Arr.sort(Arr.dedupe(xs.flatMap((x) => sources(x.value))), Order.String);
+    const seen = Num.sumAll(xs.map((x) => x.value.seen ?? 0));
+    const r = Num.sumAll(srcs.map((s) => runs[s] ?? 0));
+    const hits = Num.sumAll(xs.map((x) => x.value.hits ?? 0));
+    return { plant, signature, sources: srcs, hits, seen, runs: r, rate: r === 0 ? 0 : seen / r };
+  });
+  return Arr.sort(
+    folded,
+    Order.mapInput(Order.String, (s: Signature) => s.signature),
+  );
 });
 
 export const Signatures = Projection.make({
   id: "control::signatures",
   args: { plant: Schema.String, now: Schema.Number },
-  returns: Schema.Array(SignatureSchema),
+  returns: Schema.Array(Signature),
   reads: [Measurement],
   shows: ["signatures"],
   rollups: [signaturesRollup],
