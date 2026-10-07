@@ -95,6 +95,13 @@ describe("defineControl", () => {
       /unknown instrument/,
     );
   });
+  it("refuses an auto loop on a plant with no remote, because apply is push-only", () => {
+    const auto = { id: "l", inputs: ["s"], actuator: "a", mode: "auto" as const, operator: "k" };
+    const sensors = [{ id: "s", run: ["x"] }];
+    assert.throws(() => defineControl({ ...base, sensors, loops: [auto] }), /push-only.*no remote/);
+    defineControl({ ...base, plant: { ...base.plant, remote: "origin" }, sensors, loops: [auto] });
+    defineControl({ ...base, sensors, loops: [{ ...auto, mode: "manual" }] });
+  });
 });
 
 describe("week", () => {
@@ -251,9 +258,16 @@ describe.each(stores)("control over %s", (_name, mkStore) => {
   it.effect("hysteresis: a dismissal holds until a source joins the evidence set", () =>
     Effect.gen(function* () {
       const t = yield* boot();
-      t.world.measured.set("lint@s1", measured(["todo"]));
       t.world.changes = { ref: "swell/purge/todo", head: "h2", summary: "" };
-      yield* t.sample("s1");
+      // One sensor alone crosses the default threshold only on its third run.
+      for (const s of ["s1", "s2"]) {
+        t.world.measured.set(`lint@${s}`, measured(["todo"]));
+        yield* t.sample(s);
+        yield* t.sweep(measure, purge);
+        assert.strictEqual((yield* t.proposals()).length, 0);
+      }
+      t.world.measured.set("lint@s3", measured(["todo"]));
+      yield* t.sample("s3");
       yield* t.sweep(measure, purge);
       const [p1] = yield* t.proposals();
       assert.isDefined(p1);
@@ -263,16 +277,16 @@ describe.each(stores)("control over %s", (_name, mkStore) => {
         kai,
       );
       // The rate wobbles above the threshold on the next sample; same evidence, still dismissed.
-      t.world.measured.set("lint@s2", measured(["todo", "todo"]));
+      t.world.measured.set("lint@s4", measured(["todo", "todo"]));
       yield* TestClock.adjust(DAY);
-      yield* t.sample("s2");
+      yield* t.sample("s4");
       yield* t.sweep(measure, purge);
       assert.strictEqual((yield* t.proposals()).length, 1);
       // A second source joins: a new subject, a new move, and the brief carries the rejection text.
-      t.world.measured.set("lint@s3", measured(["todo"]));
-      t.world.measured.set("review@s3", measured(["todo"]));
+      t.world.measured.set("lint@s5", measured(["todo"]));
+      t.world.measured.set("review@s5", measured(["todo"]));
       yield* TestClock.adjust(DAY);
-      yield* t.sample("s3");
+      yield* t.sample("s5");
       yield* t.sweep(measure, purge);
       const ps = yield* t.proposals();
       assert.strictEqual(ps.length, 2);
@@ -295,6 +309,88 @@ describe.each(stores)("control over %s", (_name, mkStore) => {
       yield* t.sweep(purge);
       assert.strictEqual((yield* t.proposals()).length, 2);
     }),
+  );
+
+  it.effect(
+    "the limit counts attempts: a failed propose spends the day, and the rule gives up after two",
+    () =>
+      Effect.gen(function* () {
+        const t = yield* boot();
+        t.world.measured.set("lint@s1", measured(["dup-code"]));
+        t.world.measured.set("review@s1", measured(["dup-code"]));
+        t.world.changes = { ref: "swell/purge/dup", head: "h5", summary: "" };
+        t.world.proposeFails = true;
+        yield* t.sample("s1");
+        yield* t.sweep(measure, purge);
+        assert.strictEqual(t.world.acts.length, 1);
+        assert.strictEqual((yield* t.proposals()).length, 0);
+        // The actuator ran and spent; perDay 1 holds across repeated sweeps that day.
+        for (let i = 0; i < 3; i++) assert.strictEqual((yield* t.sweep(purge))[0]!.wanted, 0);
+        assert.strictEqual(t.world.acts.length, 1);
+        const attempts = () =>
+          t.sim.reader.find(Kernel.Attempt, "by_rule", { eq: [purge.id], gte: 0, limit: 10 });
+        assert.strictEqual((yield* attempts()).length, 1);
+        // The next day the retry goes, and its brief carries why the last one failed.
+        yield* TestClock.adjust(DAY);
+        yield* t.sweep(purge);
+        assert.strictEqual(t.world.acts.length, 2);
+        assert.deepStrictEqual(t.world.acts[0]!.previous, "");
+        assert.include(t.world.acts[1]!.previous, "gh is down");
+        // Two failed attempts and the loop rule is done, however many days pass.
+        yield* TestClock.adjust(DAY);
+        const [plan] = yield* t.sweep(purge);
+        assert.deepStrictEqual([plan!.pending.length, plan!.dead.length], [0, 1]);
+        assert.strictEqual(t.world.acts.length, 2);
+        assert.strictEqual((yield* attempts()).length, 2);
+        assert.deepStrictEqual([purge.maxAttempts, purge.leaseMs], [2, 3_600_000 + 300_000]);
+      }),
+  );
+
+  it.effect("a crashed actuator spends the day too", () =>
+    Effect.gen(function* () {
+      const t = yield* boot();
+      t.world.measured.set("lint@s1", measured(["dup-code"]));
+      t.world.measured.set("review@s1", measured(["dup-code"]));
+      t.world.changes = { ref: "swell/purge/dup", head: "h6", summary: "" };
+      t.world.failNext = 1;
+      yield* t.sample("s1");
+      yield* t.sweep(measure, purge);
+      assert.strictEqual((yield* t.sweep(purge))[0]!.wanted, 0);
+      assert.strictEqual(t.world.acts.length, 0);
+      yield* TestClock.adjust(DAY);
+      yield* t.sweep(purge);
+      assert.strictEqual((yield* t.proposals()).length, 1);
+    }),
+  );
+
+  it.effect(
+    "rate is the share of runs that saw it: two signals in one run is rate 1, one sensor needs three runs",
+    () =>
+      Effect.gen(function* () {
+        const t = yield* boot();
+        t.world.changes = { ref: "swell/purge/dup", head: "h7", summary: "" };
+        const tally = () =>
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            const [sig] = yield* signaturesOf(t.sim.reader, "repo", now);
+            return [sig!.hits, sig!.seen, sig!.runs, sig!.rate];
+          });
+        t.world.measured.set("lint@s1", measured(["dup-code", "dup-code"]));
+        yield* t.sample("s1");
+        yield* t.sweep(measure, purge);
+        assert.deepStrictEqual(yield* tally(), [2, 1, 1, 1]);
+        assert.strictEqual((yield* t.proposals()).length, 0);
+        t.world.measured.set("lint@s2", measured(["dup-code"]));
+        yield* t.sample("s2");
+        yield* t.sweep(measure, purge);
+        assert.deepStrictEqual(yield* tally(), [3, 2, 2, 1]);
+        assert.strictEqual((yield* t.proposals()).length, 0);
+        t.world.measured.set("lint@s3", measured(["dup-code"]));
+        yield* t.sample("s3");
+        yield* t.sweep(measure, purge);
+        assert.deepStrictEqual(yield* tally(), [4, 3, 3, 1]);
+        assert.strictEqual((yield* t.proposals()).length, 1);
+      }),
   );
 
   it.effect(

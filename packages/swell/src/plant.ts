@@ -99,6 +99,8 @@ export interface Brief {
   readonly signals: ReadonlyArray<Signal>;
   /** The text of the last rejection of this signature, so the next attempt reads it. */
   readonly feedback: string;
+  /** Why the last attempt on this subject failed, or empty: a retry resumes the work it left rather than starting over. */
+  readonly previous: string;
 }
 
 export interface Decision {
@@ -151,6 +153,8 @@ export const fakeWorld = () => ({
   applied: [] as Array<string>,
   failNext: 0,
   sampleFails: false,
+  /** Every `propose` fails, as when `gh` is down: the actuator already ran and spent. */
+  proposeFails: false,
 });
 export type FakeWorld = ReturnType<typeof fakeWorld>;
 
@@ -176,13 +180,15 @@ export const fakePlant = (world: FakeWorld): Layer.Layer<Plant> =>
         return world.changes;
       }),
     propose: (_plant, changes, text) =>
-      Effect.sync(() => {
-        world.proposed.push({ changes, text });
-        return {
-          apply: JSON.stringify({ ref: changes.ref, head: changes.head }),
-          cite: `fake:${changes.ref}`,
-        };
-      }),
+      world.proposeFails
+        ? Effect.fail(new PlantError({ op: `propose ${changes.ref}`, message: "gh is down" }))
+        : Effect.sync(() => {
+            world.proposed.push({ changes, text });
+            return {
+              apply: JSON.stringify({ ref: changes.ref, head: changes.head }),
+              cite: `fake:${changes.ref}`,
+            };
+          }),
     decisions: (_plant, applies) =>
       Effect.sync(() => world.decisions.filter((d) => applies.includes(d.apply))),
     apply: (_plant, apply) =>

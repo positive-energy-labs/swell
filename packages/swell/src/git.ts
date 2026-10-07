@@ -1,7 +1,7 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, normalize, resolve } from "node:path";
-import { Effect, Layer, Schema } from "effect";
+import { Clock, Effect, Layer, Schema } from "effect";
 import {
   type Brief,
   type Changes,
@@ -79,6 +79,67 @@ const must = (
 
 const NET_MS = 120_000;
 
+/** The actuator's log keeps this much of the end of each stream, so a file never outgrows 64 KiB. */
+const STREAM_TAIL = 32 * 1024 - 64;
+
+const clip = (s: string) =>
+  Buffer.byteLength(s) > STREAM_TAIL ? Buffer.from(s).subarray(-STREAM_TAIL).toString("utf8") : s;
+
+interface Actuated {
+  /** The exit code; null when the child never ran to an exit (timed out, could not start, was killed). */
+  readonly status: number | null;
+  /** Why it failed, in words, or empty. */
+  readonly why: string;
+  /** Why it failed, in a commit subject's words. */
+  readonly short: string;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/**
+ * Run an actuator and keep the end of its output. Unlike `run`, a timeout or a crash is a result carrying whatever
+ * the child printed first, because the caller salvages the work before it fails.
+ */
+const actuate = (
+  argv: ReadonlyArray<string>,
+  o: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
+) => {
+  const tail = { stdout: "", stderr: "" };
+  const done = (status: number | null, why: string, short: string): Actuated => ({
+    status,
+    why,
+    short,
+    ...tail,
+  });
+  return Effect.callback<Actuated>((resume, signal) => {
+    const child = spawn(argv[0]!, argv.slice(1), {
+      cwd: o.cwd,
+      env: o.env,
+      signal,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.setEncoding("utf8").on("data", (c: string) => (tail.stdout = clip(tail.stdout + c)));
+    child.stderr.setEncoding("utf8").on("data", (c: string) => (tail.stderr = clip(tail.stderr + c)));
+    child.on("error", (e) => resume(Effect.succeed(done(null, `could not run: ${e.message}`, "error"))));
+    child.on("close", (code, sig) =>
+      resume(
+        Effect.succeed(
+          code === 0
+            ? done(0, "", "")
+            : code === null
+              ? done(null, `killed by ${sig}`, "kill")
+              : done(code, `exited ${code}`, `exit ${code}`),
+        ),
+      ),
+    );
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: o.timeoutMs,
+      orElse: () => Effect.sync(() => done(null, `timed out after ${o.timeoutMs} ms`, "timeout")),
+    }),
+  );
+};
+
 const samePath = (a: string, b: string) =>
   normalize(resolve(a)).toLowerCase() === normalize(resolve(b)).toLowerCase();
 
@@ -127,6 +188,47 @@ const slug = (s: string) =>
     .slice(0, 40)
     .toLowerCase();
 
+/** A git read that may honestly find nothing. */
+const probe = (cwd: string, ...args: ReadonlyArray<string>) => {
+  try {
+    return git(cwd, ...args);
+  } catch {
+    return undefined;
+  }
+};
+
+/** The commit a finished move ends in. The body names the evidence set, so a move for other evidence is never mistaken for this one. */
+const doneMessage = (brief: Brief) => {
+  const sha7 = brief.sample.slice(0, 7);
+  return {
+    subject: `swell: ${brief.loop} ${brief.signature} at ${sha7}`,
+    body: `sources: ${[...brief.sources].sort().join(", ")}`,
+  };
+};
+
+const WIP = "swell: wip ";
+
+/**
+ * What an earlier attempt left on the move branch, judged from its head: a finished move for this very evidence
+ * (skip the actuator), unfinished work (resume it), or nothing usable (start from the sample).
+ */
+type Prior =
+  | { readonly kind: "done"; readonly head: string }
+  | { readonly kind: "resume"; readonly head: string }
+  | { readonly kind: "fresh" };
+
+const priorWork = (root: string, branch: string, brief: Brief): Prior => {
+  const head = probe(root, "rev-parse", "--verify", "-q", `refs/heads/${branch}`);
+  if (head === undefined) return { kind: "fresh" };
+  if (probe(root, "merge-base", "--is-ancestor", brief.sample, head) === undefined) return { kind: "fresh" };
+  const subject = git(root, "log", "-1", "--format=%s", head);
+  if (subject.startsWith(WIP)) return { kind: "resume", head };
+  const done = doneMessage(brief);
+  if (subject === done.subject && git(root, "log", "-1", "--format=%b", head).includes(done.body))
+    return { kind: "done", head };
+  return { kind: "fresh" };
+};
+
 type Apply = { readonly ref: string; readonly head: string; readonly pr?: string };
 const target = (plant: PlantSpec) =>
   plant.remote === undefined ? plant.ref : `${plant.remote}/${plant.ref}`;
@@ -139,8 +241,8 @@ const fetch = (plant: PlantSpec) =>
       });
 
 /**
- * Git as a plant. The controller's own tree is never the plant: every instrument and actuator runs in a
- * worktree under `work`, and only `apply` with no PR touches the ref checked out at the plant root.
+ * Git as a plant. The controller's own tree is never the plant: every instrument, actuator and apply runs in a
+ * worktree under `work`, and nothing here touches the plant root's working tree, HEAD or index.
  */
 export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }): Layer.Layer<Plant> =>
   Layer.succeed(Plant, {
@@ -182,18 +284,25 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
         const op = `act ${actuator.id}`;
         const sha7 = brief.sample.slice(0, 7);
         const branch = `swell/${brief.loop}/${slug(brief.signature)}-${sha7}`;
+        const stem = `${plant.id}-${brief.loop}-${slug(brief.signature)}-${sha7}`;
+        const changesAt = (head: string): Changes => ({
+          ref: branch,
+          head,
+          summary: git(plant.root, "diff", "--shortstat", `${brief.sample}..${head}`),
+        });
+        // A finished move for this evidence is never made twice: a retry after a failed propose skips the agent.
+        const prior = yield* sync(op, () => priorWork(plant.root, branch, brief));
+        if (prior.kind === "done") return yield* sync(op, () => changesAt(prior.head));
+
         const { cwd, briefPath } = yield* sync(op, () => {
+          // Resume what an earlier attempt left: the branch stays where it is, and the brief says why it stopped.
           const cwd = worktreeAt(
             plant.root,
             join(opts.work, "act", plant.id, brief.loop),
             branch,
-            brief.sample,
+            prior.kind === "resume" ? prior.head : brief.sample,
           );
-          const briefPath = join(
-            opts.work,
-            "briefs",
-            `${plant.id}-${brief.loop}-${slug(brief.signature)}-${sha7}.json`,
-          );
+          const briefPath = join(opts.work, "briefs", `${stem}.json`);
           mkdirSync(resolve(briefPath, ".."), { recursive: true });
           writeFileSync(briefPath, JSON.stringify(brief, null, 2));
           return { cwd, briefPath };
@@ -204,14 +313,40 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
           SWELL_ROOT: plant.root,
           SWELL_BRIEF: briefPath,
         });
-        yield* must(op, actuator.run, { cwd, env, timeoutMs: actuator.timeoutMs ?? 3_600_000 });
+        const startedAt = yield* Clock.currentTimeMillis;
+        const ran = yield* actuate(actuator.run, { cwd, env, timeoutMs: actuator.timeoutMs ?? 3_600_000 });
+        if (ran.status !== 0) {
+          // The agent's work cost money: keep what it left on the branch and its output in a log, then fail naming both.
+          const message = yield* sync(op, () => {
+            if (!isOwnTop(cwd)) throw new Error("actuator moved the worktree");
+            const log = join(
+              opts.work,
+              "logs",
+              `${stem}-${new Date(startedAt).toISOString().replace(/[:.]/g, "-")}.log`,
+            );
+            mkdirSync(resolve(log, ".."), { recursive: true });
+            writeFileSync(
+              log,
+              `# actuator ${actuator.id} ${ran.why}\n== stdout ==\n${ran.stdout}\n== stderr ==\n${ran.stderr}\n`,
+            );
+            const kept = git(cwd, "status", "--porcelain") !== "";
+            if (kept) {
+              git(cwd, "add", "-A");
+              git(cwd, "commit", "-q", "-m", `${WIP}${brief.loop} ${brief.signature} after ${ran.short}`);
+            }
+            return `actuator ${actuator.id} ${ran.why}; ${kept ? "work kept" : "nothing to keep"} on branch ${branch}; log ${log}`;
+          });
+          return yield* Effect.fail(new PlantError({ op, message }));
+        }
         return yield* sync(op, (): Changes | null => {
           if (!isOwnTop(cwd)) throw new Error("actuator moved the worktree");
-          if (git(cwd, "status", "--porcelain") === "") return null;
-          git(cwd, "add", "-A");
-          git(cwd, "commit", "-q", "-m", `swell: ${brief.loop} ${brief.signature} at ${sha7}`);
-          const head = git(cwd, "rev-parse", "HEAD");
-          return { ref: branch, head, summary: git(cwd, "diff", "--shortstat", `${brief.sample}..${head}`) };
+          const dirty = git(cwd, "status", "--porcelain") !== "";
+          // Resumed work counts even when this run added nothing: the branch is already ahead of the sample.
+          if (!dirty && git(cwd, "rev-parse", "HEAD") === brief.sample) return null;
+          if (dirty) git(cwd, "add", "-A");
+          const done = doneMessage(brief);
+          git(cwd, "commit", "-q", "--allow-empty", "-m", done.subject, "-m", done.body);
+          return changesAt(git(cwd, "rev-parse", "HEAD"));
         });
       }),
 
@@ -298,22 +433,33 @@ export const gitPlant = (opts: { readonly work: string; readonly gh: boolean }):
           yield* fetch(plant);
           return yield* sync(op, () => git(plant.root, "rev-parse", target(plant)));
         }
-        // The controller merges only into a ref checked out in the plant's own tree.
-        const sha = yield* sync(op, () => {
-          const current = git(plant.root, "rev-parse", "--abbrev-ref", "HEAD");
-          if (current !== plant.ref)
-            throw new Error(`plant root has ${current} checked out, not ${plant.ref}`);
-          if (git(plant.root, "status", "--porcelain") !== "") throw new Error("plant root is dirty");
-          git(plant.root, "merge", "-q", "--squash", a.head);
-          git(plant.root, "commit", "-q", "-m", `swell: ${a.ref}`);
-          return git(plant.root, "rev-parse", "HEAD");
+        // Push-only: squash in a worktree of the controller's own, onto the freshly fetched remote ref, and push
+        // without force. The plant root's tree, HEAD and index are never touched. A rejected push (the ref moved)
+        // is a failed apply, and the kernel retries it on a later sweep against a new fetch.
+        const remote = plant.remote;
+        if (remote === undefined)
+          return yield* Effect.fail(
+            new PlantError({ op, message: "apply is push-only and the plant has no remote" }),
+          );
+        yield* fetch(plant);
+        const squashed = yield* sync(op, () => {
+          const cwd = worktreeAt(
+            plant.root,
+            join(opts.work, "apply", plant.id),
+            `swell/apply/${plant.id}`,
+            git(plant.root, "rev-parse", target(plant)),
+          );
+          git(cwd, "merge", "-q", "--squash", a.head);
+          // Nothing staged: the change is already in the remote ref, so there is nothing to push.
+          if (probe(cwd, "diff", "--cached", "--quiet") !== undefined) return { cwd, push: false };
+          git(cwd, "commit", "-q", "-m", `swell: ${a.ref}`);
+          return { cwd, push: true };
         });
-        if (plant.remote !== undefined) {
-          yield* must(op, ["git", "-C", plant.root, "push", "-q", plant.remote, plant.ref], {
-            cwd: plant.root,
+        if (squashed.push)
+          yield* must(op, ["git", "-C", squashed.cwd, "push", "-q", remote, `HEAD:refs/heads/${plant.ref}`], {
+            cwd: squashed.cwd,
             timeoutMs: NET_MS,
           });
-        }
-        return sha;
+        return yield* sync(op, () => git(squashed.cwd, "rev-parse", "HEAD"));
       }),
   });

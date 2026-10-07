@@ -1,5 +1,5 @@
-import { type AnyFact, Command, Entry, type Reader, Rule, violation } from "@swell/kernel";
-import { Effect, Schema } from "effect";
+import { type AnyFact, Command, Entry, Kernel, latest, type Reader, Rule, violation } from "@swell/kernel";
+import { Effect, Option, Schema } from "effect";
 import {
   Measurement,
   meta,
@@ -27,7 +27,7 @@ export interface LoopSpec {
   readonly id: string;
   /** Sensor and observer ids whose signatures this loop acts on. */
   readonly inputs: ReadonlyArray<string>;
-  /** Default: two sources agree, or one sensor sees it in every run of the window. */
+  /** Default: two sources agree, or a known signature is seen in every run of the window, over at least three runs. */
   readonly threshold?: (signature: Signature) => boolean;
   /** The actuator's rate limit: moves proposed per day. */
   readonly limit?: { readonly perDay: number };
@@ -80,12 +80,18 @@ export const defineControl = (spec: ControlSpec): ControlSpec => {
       if (!known.has(s)) throw new Error(`swell: loop '${loop.id}' reads unknown instrument '${s}'`);
     if (!actuators.has(loop.actuator))
       throw new Error(`swell: loop '${loop.id}' moves with unknown actuator '${loop.actuator}'`);
+    // Push-only apply: an auto move lands by pushing to the remote, never by touching the plant's own tree.
+    if (loop.mode === "auto" && spec.plant.remote === undefined)
+      throw new Error(
+        `swell: loop '${loop.id}' is auto, and apply is push-only: plant '${spec.plant.id}' has no remote`,
+      );
   }
   return spec;
 };
 
+/** Two sources agree, or a known signature was seen in every run of the window, over at least three runs. */
 export const defaultThreshold = (sig: Signature): boolean =>
-  sig.sources.length >= 2 || (!sig.signature.startsWith("new:") && sig.rate >= 1);
+  sig.sources.length >= 2 || (!sig.signature.startsWith("new:") && sig.runs >= 3 && sig.rate >= 1);
 
 /** djb2 over the sorted evidence set; a new source is a new subject, and the kernel's receipt dedupes the rest. */
 export const evidenceHash = (sources: ReadonlyArray<string>): string => {
@@ -107,6 +113,8 @@ const LoopSubject = Schema.Struct({
   sources: Schema.Array(Schema.String),
   signals: Schema.Array(Signal),
   feedback: Schema.String,
+  /** The newest failed receipt's error for this subject: what the last attempt left, so the next one resumes. */
+  previous: Schema.String,
 });
 const ApplySubject = Schema.Struct({ urn: Schema.String, apply: Schema.String });
 
@@ -130,6 +138,28 @@ const latestSample = (db: Reader<AnyFact>, plant: string, enabledAt: number) =>
   db
     .find(Sample, "by_plant", { eq: [plant], gte: enabledAt, order: "desc", limit: 1 })
     .pipe(Effect.map((r) => r[0]));
+
+/** Failures since the last retry grant, and the newest failure's error: the kernel's own rows, read the way `plan` reads them. */
+const failuresOf = (db: Reader<AnyFact>, rule: string, urn: string) =>
+  Effect.gen(function* () {
+    const eq = [rule, urn];
+    const failed = (yield* db.find(Kernel.Receipt, "by_key", { eq, limit: 64 })).filter(
+      (r) => r.outcome === "failed",
+    );
+    const grant = latest(yield* db.find(Kernel.RetryGranted, "by_key", { eq, limit: 64 }));
+    const since = Option.match(grant, { onNone: () => 0, onSome: (g) => g.at });
+    return {
+      count: failed.filter((r) => r.at >= since).length,
+      previous: latest(failed).pipe(
+        Option.map((r) => r.error ?? ""),
+        Option.getOrElse(() => ""),
+      ),
+    };
+  });
+
+/** A loop rule gives up after this many failed attempts: an actuator is an agent, and a retry costs real money. */
+const LOOP_ATTEMPTS = 2;
+const LEASE_SLACK_MS = 5 * 60_000;
 
 /** Compile one declaration into kernel primitives: a measure rule, one rule per loop, an apply rule, and the feedback entry. */
 export const rulesOf = (spec: ControlSpec) => {
@@ -224,14 +254,19 @@ export const rulesOf = (spec: ControlSpec) => {
     ),
   });
 
-  const loops = spec.loops.map((loop) =>
-    Rule.make({
-      id: `control::${plant.id}-${loop.id}`,
-      reads: [Measurement, Proposal, Verdict, Sample],
+  const loops = spec.loops.map((loop) => {
+    const ruleId = `control::${plant.id}-${loop.id}` as const;
+    const actuator = actuators.get(loop.actuator)!;
+    return Rule.make({
+      id: ruleId,
+      reads: [Measurement, Proposal, Verdict, Sample, Kernel.Attempt, Kernel.Receipt, Kernel.RetryGranted],
       uses: [PlantPort],
       writes: [Proposal, Verdict],
       triggers: [Rule.onFact(Measurement)],
       subject: LoopSubject,
+      maxAttempts: LOOP_ATTEMPTS,
+      // A long actuator is never presumed dead and started a second time.
+      leaseMs: (actuator.timeoutMs ?? 3_600_000) + LEASE_SLACK_MS,
       want: (db, { now, enabledAt }) =>
         Effect.gen(function* () {
           const threshold = loop.threshold ?? defaultThreshold;
@@ -252,9 +287,14 @@ export const rulesOf = (spec: ControlSpec) => {
             limit: 2048,
           });
           const verdictOf = new Map(verdicts.filter((v) => v.loop === loop.id).map((v) => [v.subject, v]));
+          // The limit counts the kernel's attempts, not proposals: a failed propose or a crashed actuator spent real money.
           const dayStart = now - (now % DAY_MS);
-          let spent = proposals.filter((p) => p.at >= dayStart).length;
-          const limit = loop.limit?.perDay ?? Number.POSITIVE_INFINITY;
+          const attempts = yield* db.find(Kernel.Attempt, "by_rule", {
+            eq: [ruleId],
+            gte: dayStart,
+            limit: 2048,
+          });
+          let budget = (loop.limit?.perDay ?? Number.POSITIVE_INFINITY) - attempts.length;
           const out: Array<typeof LoopSubject.Type> = [];
           for (const sig of sigs) {
             const mine = proposals.filter((p) => p.signature === sig.signature);
@@ -263,8 +303,14 @@ export const rulesOf = (spec: ControlSpec) => {
             // Hysteresis: dismissed, and the evidence set has not grown past what was dismissed.
             const dismissed = mine.filter((p) => verdictOf.get(p.subject)?.accept === false);
             if (dismissed.some((p) => sig.sources.every((s) => p.sources.includes(s)))) continue;
-            if (spent >= limit) break;
-            spent++;
+            const subject = `${sig.signature}@${evidenceHash(sig.sources)}`;
+            const urn = `${plant.id}/${loop.id}/${subject}`;
+            const failures = yield* failuresOf(db, ruleId, urn);
+            // A given-up subject stays visible as dead, but a new attempt is what the limit meters.
+            if (failures.count < LOOP_ATTEMPTS) {
+              if (budget <= 0) continue;
+              budget--;
+            }
             const signals: Array<Signal> = [];
             for (const s of sig.sources) {
               const last = (yield* db.find(Measurement, "by_instrument", {
@@ -277,15 +323,15 @@ export const rulesOf = (spec: ControlSpec) => {
             const feedback = dismissed
               .map((p) => verdictOf.get(p.subject))
               .sort((a, b) => (b?.at ?? 0) - (a?.at ?? 0))[0]?.text;
-            const subject = `${sig.signature}@${evidenceHash(sig.sources)}`;
             out.push({
-              urn: `${plant.id}/${loop.id}/${subject}`,
+              urn,
               subject,
               signature: sig.signature,
               sample: head.sample,
               sources: sig.sources,
               signals: signals.slice(0, BRIEF_SIGNALS),
               feedback: feedback ?? "",
+              previous: failures.previous,
             });
           }
           return out;
@@ -300,8 +346,9 @@ export const rulesOf = (spec: ControlSpec) => {
             sources: s.sources,
             signals: s.signals,
             feedback: s.feedback,
+            previous: s.previous,
           };
-          const changes = yield* p.act(plant, actuators.get(loop.actuator)!, brief);
+          const changes = yield* p.act(plant, actuator, brief);
           if (changes === null)
             return yield* Effect.fail(
               new PlantError({ op: `act ${loop.actuator}`, message: "actuator changed nothing" }),
@@ -332,8 +379,8 @@ export const rulesOf = (spec: ControlSpec) => {
         "When the evidence for one signature crosses the threshold, run the actuator once and propose the move it made.",
         "one move per signature; evidence in, proposal out",
       ),
-    }),
-  );
+    });
+  });
 
   const apply = Rule.make({
     id: `control::${plant.id}-apply`,

@@ -162,7 +162,10 @@ export const week = (at: number): string => {
 const weeksBack = (at: number, n: number): ReadonlyArray<string> =>
   Array.from({ length: n }, (_, i) => week(at - i * 604_800_000));
 
-/** Tally keys: `<plant>|run|<instrument>|<week>` counts measurements; `<plant>|sig|<signature>|<week>` counts hits and marks each source. */
+/**
+ * Tally keys: `<plant>|run|<instrument>|<week>` counts measurements; `<plant>|sig|<signature>|<week>` counts
+ * `hits` (signals), `seen` (measurements that saw it, once however many signals) and marks each source.
+ */
 export const signaturesRollup = Projection.rollup({
   id: "control::signatures",
   on: Measurement,
@@ -175,7 +178,7 @@ export const signaturesRollup = Projection.rollup({
       const hits = new Map<string, number>();
       for (const s of row.signals) hits.set(s.signature, (hits.get(s.signature) ?? 0) + 1);
       for (const [sig, n] of hits)
-        out.push([`${row.plant}|sig|${sig}|${w}`, { hits: n, [`src:${row.instrument}`]: 1 }]);
+        out.push([`${row.plant}|sig|${sig}|${w}`, { hits: n, seen: 1, [`src:${row.instrument}`]: 1 }]);
       return out;
     }),
 });
@@ -186,9 +189,13 @@ export interface Signature {
   readonly signature: string;
   /** Distinct instruments that saw it in the window. Strength is this, never a count. */
   readonly sources: ReadonlyArray<string>;
+  /** Signals in the window: a measurement with two signals of one signature adds two. */
   readonly hits: number;
-  /** Measurements in the window by the sources that saw it, so `rate` is hits per run. */
+  /** Measurements in the window that saw it at least once, however many signals each held. */
+  readonly seen: number;
+  /** Measurements in the window by the sources that saw it. */
   readonly runs: number;
+  /** `seen / runs`, 0..1: the share of runs that saw it. */
   readonly rate: number;
 }
 
@@ -207,7 +214,7 @@ export const signaturesOf = (db: Reader<never>, plant: string, now: number, week
       const instrument = r.key.split("|")[2]!;
       runs.set(instrument, (runs.get(instrument) ?? 0) + (r.value.runs ?? 0));
     }
-    const sigs = new Map<string, { hits: number; sources: Set<string> }>();
+    const sigs = new Map<string, { hits: number; seen: number; sources: Set<string> }>();
     for (const r of yield* db.tallies("control::signatures", {
       gte: `${plant}|sig|`,
       lt: `${plant}|sig|~`,
@@ -215,15 +222,16 @@ export const signaturesOf = (db: Reader<never>, plant: string, now: number, week
     })) {
       if (!inWindow(r.key)) continue;
       const sig = r.key.slice(`${plant}|sig|`.length, r.key.lastIndexOf("|"));
-      const cur = sigs.get(sig) ?? { hits: 0, sources: new Set<string>() };
+      const cur = sigs.get(sig) ?? { hits: 0, seen: 0, sources: new Set<string>() };
       cur.hits += r.value.hits ?? 0;
+      cur.seen += r.value.seen ?? 0;
       for (const k of Object.keys(r.value)) if (k.startsWith("src:")) cur.sources.add(k.slice(4));
       sigs.set(sig, cur);
     }
-    return [...sigs].map(([signature, { hits, sources }]): Signature => {
+    return [...sigs].map(([signature, { hits, seen, sources }]): Signature => {
       const srcs = [...sources].sort();
       const r = srcs.reduce((n, s) => n + (runs.get(s) ?? 0), 0);
-      return { plant, signature, sources: srcs, hits, runs: r, rate: r === 0 ? 0 : hits / r };
+      return { plant, signature, sources: srcs, hits, seen, runs: r, rate: r === 0 ? 0 : seen / r };
     });
   });
 
@@ -232,6 +240,7 @@ export const SignatureSchema = Schema.Struct({
   signature: Schema.String,
   sources: Schema.Array(Schema.String),
   hits: Schema.Number,
+  seen: Schema.Number,
   runs: Schema.Number,
   rate: Schema.Number,
 });
